@@ -24,18 +24,19 @@ os.environ.setdefault('QT_LOGGING_RULES', 'qt.svg*=false')
 from PyQt6.QtCore import QRect, QRectF, QSize, Qt  # noqa: E402
 from PyQt6.QtGui import QColor, QFont, QGuiApplication, QIcon, QImage, QPainter  # noqa: E402
 
-# The light themes differ only on apps MacTahoe has no icon for, and it covers
-# nearly every well-known one. So this is a mixed dock: familiar MacTahoe apps
-# (identical in both rows) alternate with uncovered ones, whose bare logos
-# break the look in the first row and sit on matching tiles in the second.
+# MacTahoe covers nearly every well-known app, so this is a mixed dock:
+# familiar MacTahoe apps, which only gain the common shadow and outline (or a
+# white tile instead of a graphite one: Kitty, VS Code), alternate with
+# uncovered ones, whose bare logos break the look in the first row and sit on
+# matching tiles in the second.
 LIGHT_APPS = [
     'firefox',
     'account-google',       # uncovered
-    'kitty',
+    'kitty',                # graphite tile
     'r',                    # uncovered
     'spotify',
-    'scrcpy',               # uncovered (Android logo)
-    'visual-studio-code',
+    'proton-pass',          # uncovered
+    'visual-studio-code',   # graphite tile
     'claude-desktop',       # uncovered
     'discord',
     'obsidian',

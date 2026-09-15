@@ -41,8 +41,9 @@ SIZES=(16 22 24 32 48 64 96 128 256 512)
 
 # Dark-theme tile: near-black "glass" rather than a mid grey, matching Tahoe's
 # dark appearance -- a very dark neutral ramp plus a white sheen down the top of
-# the squircle. Defined once here and passed into both the Pillow pass (step 5)
-# and the SVG re-tint (step 5b) so the raster and vector icons agree.
+# the squircle. Defined once here and passed into the Pillow pass (step 5), the
+# SVG re-tint (step 5b) and the tile repaint (step 5d) so the raster and vector
+# icons agree.
 DARK_TILE_TOP="#2c2c2f"     # top of the tile gradient
 DARK_TILE_BOT="#1c1c1e"     # bottom
 DARK_TILE_HL="0.10"         # white sheen opacity at the top edge, fading to 0
@@ -52,12 +53,34 @@ DARK_TILE_RIM="0.35"        # corner rim glow: 1px inset stroke on the squircle,
                             # Matches the rim MacTahoe already bakes into a few
                             # icons (Finder, Obsidian); 0 disables it.
 
+# Light-theme tile: MacTahoe's own warm white ramp, so generated tiles match the
+# ~300 white tiles MacTahoe draws itself. Step 5d turns MacTahoe's neutral dark
+# tiles (kitty, VS Code, terminals, ...) into this same ramp, and repaints its
+# other whites and greys (flat white, cool grey, ...) with it; step 5 does the
+# same for artwork that brings its own neutral tile (Proton Pass).
+LIGHT_TILE_TOP="#fdfcfc"
+LIGHT_TILE_BOT="#f1efeb"
+
+# One drop shadow under every app tile, in both themes, and a hairline outline
+# along the squircle edge in the light theme; pixels on the 512 canvas. Step 5
+# draws them into the generated icons, and step 5d swaps MacTahoe's own shadows
+# (which differ from icon to icon, and are missing from some) for the same one.
+TILE_SHADOW_ALPHA="70"      # 0-255
+TILE_SHADOW_BLUR="10"       # Gaussian radius
+TILE_SHADOW_DROP="8"        # downward offset
+TILE_OUTLINE_ALPHA="22"     # 2px black line just inside the edge; 0-255
+
 # Apps whose icon should come from a specific file rather than from MacTahoe or
 # from the usual source-art search. The file is run through the same tile wrap as
 # every other app, so the result is a macOS-shaped icon carrying that artwork.
 # One "icon-name=/path/to/source.svg-or-png" per line; blank lines and lines
 # starting with # are skipped, and a leading ~/ is expanded.
 OVERRIDES_FILE="$CONFIG_HOME/macos-like/overrides.conf"
+
+# Icons that keep a dark tile in the light theme: one icon name per line (an
+# alias such as "com.visualstudio.code" counts for the file it points to); #
+# starts a comment.
+KEEP_DARK_FILE="$CONFIG_HOME/macos-like/keep-dark.conf"
 
 FORCE=0
 DRYRUN=0
@@ -417,8 +440,10 @@ if [ "${#WORK[@]}" -gt 0 ]; then
   printf '%s\n' "${WORK[@]}" > "$WORKLIST"
   python3 - "$THEME_LIGHT" "$THEME_DARK" "$WORKLIST" \
            "$DARK_TILE_TOP" "$DARK_TILE_BOT" "$DARK_TILE_HL" "$DARK_TILE_HL_SPAN" \
-           "$DARK_TILE_RIM" <<'PYEOF'
-import sys, os, math, subprocess, tempfile
+           "$DARK_TILE_RIM" "$LIGHT_TILE_TOP" "$LIGHT_TILE_BOT" \
+           "$TILE_SHADOW_ALPHA" "$TILE_SHADOW_BLUR" "$TILE_SHADOW_DROP" \
+           "$TILE_OUTLINE_ALPHA" "$KEEP_DARK_FILE" <<'PYEOF'
+import sys, os, math, statistics, subprocess, tempfile
 from PIL import Image, ImageDraw, ImageFilter, ImageChops
 
 light_dir, dark_dir, worklist = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -437,6 +462,21 @@ DARK_HL, DARK_HL_SPAN = float(sys.argv[6]), float(sys.argv[7])
 DARK_RIM = float(sys.argv[8])
 DARK_MID_L = (luma(DARK_TOP) + luma(DARK_BOT)) / 2   # where white must land
 DARK_LIFT = 1.02                                     # where black must lift to
+LIGHT_TOP, LIGHT_BOT = hex2rgb(sys.argv[9]), hex2rgb(sys.argv[10])
+LIGHT_MID_L = (luma(LIGHT_TOP) + luma(LIGHT_BOT)) / 2
+GLYPH_DARK_L = 0.11                     # where a white glyph lands on a lightened tile
+SHADOW_A, SHADOW_BLUR, SHADOW_DROP = (int(v) for v in sys.argv[11:14])
+OUTLINE_A = int(sys.argv[14])
+
+def keep_dark(path):
+    """icon names listed in keep-dark.conf (missing file: none)."""
+    try:
+        with open(path, encoding='utf-8') as f:
+            return {ln.split('#', 1)[0].strip() for ln in f} - {''}
+    except OSError:
+        return set()
+
+KEEP_DARK = keep_dark(sys.argv[15])
 
 SIZES = [16, 22, 24, 32, 48, 64, 96, 128, 256, 512]
 C = 512                               # canvas
@@ -471,7 +511,8 @@ ImageDraw.Draw(MASK).rounded_rectangle(
     [MARGIN, MARGIN, MARGIN + TILE - 1, MARGIN + TILE - 1], radius=RADIUS, fill=255)
 
 SHADOW = Image.new('RGBA', (C, C), (0, 0, 0, 0))
-SHADOW.paste((0, 0, 0, 70), (0, 8), MASK.filter(ImageFilter.GaussianBlur(10)))
+SHADOW.paste((0, 0, 0, SHADOW_A), (0, SHADOW_DROP),
+             MASK.filter(ImageFilter.GaussianBlur(SHADOW_BLUR)))
 
 def border(rgba):
     b = Image.new('RGBA', (C, C), (0, 0, 0, 0))
@@ -480,7 +521,7 @@ def border(rgba):
         radius=RADIUS, outline=rgba, width=2)
     return b
 
-BORDER_DARKLINE = border((0, 0, 0, 22))     # over light fills / full-bleed art
+BORDER_DARKLINE = border((0, 0, 0, OUTLINE_A))   # every light-theme tile
 
 # Tahoe's corner rim: a 1px band just inside the squircle edge, painted with two
 # white->transparent ramps -- one anchored at the top-left corner, one at the
@@ -524,25 +565,37 @@ def rim_layer(opacity):
 
 RIM_GLOW = rim_layer(DARK_RIM)              # the dark tile's only edge treatment
 
-def tile_base(top, bot, bord, hl=0.0, hl_span=1.0):
-    grad = Image.new('RGBA', (C, C))
-    px = grad.load()
-    for y in range(MARGIN, MARGIN + TILE):
-        t = (y - MARGIN) / TILE
+def tile_rows(top, bot, hl=0.0, hl_span=1.0):
+    """the tile's colour on every canvas row (clamped above and below it)."""
+    rows = []
+    for y in range(C):
+        t = min(max((y - MARGIN) / TILE, 0.0), 1.0)
         col = [round(a + (b - a) * t) for a, b in zip(top, bot)]
         if hl > 0.0:
             # glass sheen: strongest at the top edge, gone by hl_span down
             a = hl * max(0.0, 1.0 - t / hl_span)
             col = [round(c + (255 - c) * a) for c in col]
-        col = tuple(col) + (255,)
+        rows.append(tuple(col))
+    return rows
+
+TILE_ROW = {
+    'light': tile_rows(LIGHT_TOP, LIGHT_BOT),
+    'dark':  tile_rows(DARK_TOP, DARK_BOT, DARK_HL, DARK_HL_SPAN),
+}
+
+def tile_base(variant, bord):
+    grad = Image.new('RGBA', (C, C))
+    px = grad.load()
+    for y in range(MARGIN, MARGIN + TILE):
+        col = TILE_ROW[variant][y] + (255,)
         for x in range(MARGIN, MARGIN + TILE):
             px[x, y] = col
     grad.putalpha(MASK)
     return Image.alpha_composite(Image.alpha_composite(SHADOW, grad), bord)
 
 BASE = {
-    'light': tile_base((253, 253, 253), (233, 233, 233), BORDER_DARKLINE),
-    'dark':  tile_base(DARK_TOP, DARK_BOT, RIM_GLOW, DARK_HL, DARK_HL_SPAN),
+    'light': tile_base('light', BORDER_DARKLINE),
+    'dark':  tile_base('dark', RIM_GLOW),
 }
 
 # --- source-art classification ------------------------------------------------
@@ -660,11 +713,11 @@ ImageDraw.Draw(_INNER).rounded_rectangle(
     radius=RADIUS - 16, fill=255)
 RIM_BAND_MASK = ImageChops.subtract(MASK, _INNER)  # 16px band inside the squircle
 
-def rim_is_light_neutral(layer):
-    """True when the artwork's own backdrop is a white/near-white tile rather
-    than a brand colour — i.e. it should be re-tinted, not shipped as-is."""
+def rim_stats(layer):
+    """(samples, mean luma, luma spread, mean saturation) of the artwork's own
+    backdrop, read off the band just inside the squircle edge."""
     px, rp = layer.load(), RIM_BAND_MASK.load()
-    n = sl = ss = 0
+    ls, ss = [], 0.0
     for y in range(MARGIN, MARGIN + TILE, 3):
         for x in range(MARGIN, MARGIN + TILE, 3):
             if rp[x, y] < 200:
@@ -673,15 +726,56 @@ def rim_is_light_neutral(layer):
             if a < 200:
                 continue
             mx, mn = max(r, g, b), min(r, g, b)
-            n += 1
-            sl += (0.299 * r + 0.587 * g + 0.114 * b) / 255
+            ls.append((0.299 * r + 0.587 * g + 0.114 * b) / 255)
             ss += (mx - mn) / mx if mx else 0.0
-    return n >= 100 and sl / n > 0.82 and ss / n < 0.12
+    if not ls:
+        return 0, 0.0, 0.0, 0.0
+    return len(ls), statistics.fmean(ls), statistics.pstdev(ls), ss / len(ls)
 
-def darkify(layer):
-    """Invert the luminance of near-neutral pixels inside the squircle: a white
-    backdrop lands on the graphite tile tone, saturated brand colours are left
-    alone, and dark neutral detail brightens so it stays readable."""
+def rim_is_light_neutral(stats):
+    """A white/near-white tile rather than a brand colour: the dark theme
+    re-tints it instead of shipping it as-is."""
+    n, lum, _, sat = stats
+    return n >= 100 and lum > 0.82 and sat < 0.12
+
+def rim_is_dark_neutral(stats):
+    """A flat graphite/black tile (haruna, xclicker): the light theme turns it
+    white. Flat matters: dark cover art (Steam games) has a busy edge, and
+    inverting that would make a negative of the picture."""
+    n, lum, spread, sat = stats
+    return n >= 100 and lum < 0.40 and sat < 0.12 and spread < 0.03
+
+def dark_px(c):
+    """darkify's colour map: near-neutral colours invert, aimed so white lands
+    exactly on the dark tile's mid tone; saturated brand colours stay."""
+    r, g, b = c
+    mx, mn = max(r, g, b), min(r, g, b)
+    w = 1.0 - min(((mx - mn) / mx if mx > 0 else 0.0) / 0.18, 1.0)
+    if w <= 0.0:
+        return c
+    L = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+    d = (DARK_LIFT - (DARK_LIFT - DARK_MID_L) * L) - L
+    return tuple(v + (min(255, max(0, v + d * 255)) - v) * w for v in c)
+
+def light_px(c, k):
+    """lightify's colour map: its mirror, with white landing on near-black."""
+    r, g, b = c
+    # absolute chroma, not darkify's ratio: on a dark grey a few levels of tint
+    # already read as saturated and would half-block the flip
+    ch = (max(r, g, b) - min(r, g, b)) / 255
+    w = 1.0 - min(max(ch - 0.04, 0.0) / 0.14, 1.0)
+    if w <= 0.0:
+        return c
+    L = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+    d = (GLYPH_DARK_L + k * (1.0 - L)) - L
+    return tuple(v + (min(255, max(0, v + d * 255)) - v) * w for v in c)
+
+def light_k(back_l):
+    """light_px's slope: the backdrop (luma back_l) lands on the light tile's
+    mid tone."""
+    return (LIGHT_MID_L - GLYPH_DARK_L) / max(1.0 - back_l, 0.05)
+
+def remap(layer, f):
     out = layer.copy()
     px, mp = out.load(), MASK.load()
     for y in range(MARGIN, MARGIN + TILE):
@@ -691,21 +785,134 @@ def darkify(layer):
             r, g, b, a = px[x, y]
             if a < 250:
                 continue      # the artwork's own soft shadow: leave it dark
-            mx, mn = max(r, g, b), min(r, g, b)
-            w = 1.0 - min(((mx - mn) / mx if mx else 0.0) / 0.18, 1.0)
-            if w <= 0.0:
-                continue
-            L = (0.299 * r + 0.587 * g + 0.114 * b) / 255
-            # inversion aimed so white lands exactly on the tile's mid tone
-            d = (DARK_LIFT - (DARK_LIFT - DARK_MID_L) * L) - L
-            px[x, y] = tuple(
-                round(c + (min(255, max(0, c + d * 255)) - c) * w)
-                for c in (r, g, b)) + (a,)
+            px[x, y] = tuple(round(v) for v in f((r, g, b))) + (a,)
     return out
 
-def prepare(glyph):
+def darkify(layer):
+    """Invert the luminance of near-neutral pixels inside the squircle: a white
+    backdrop lands on the graphite tile tone, saturated brand colours are left
+    alone, and dark neutral detail brightens so it stays readable."""
+    return remap(layer, dark_px)
+
+def lightify(layer, back_l):
+    """darkify's mirror for the light theme: near-neutral pixels invert, aimed
+    so the backdrop (luma back_l) lands on the light tile's mid tone and white
+    detail on near-black; brand colours stay. None when the coloured art then
+    loses most of its contrast (a yellow logo on white) -- keep it dark then."""
+    px, mp = layer.load(), MASK.load()
+    n = c0 = c1 = 0.0
+    for y in range(MARGIN, MARGIN + TILE):
+        for x in range(MARGIN, MARGIN + TILE):
+            if mp[x, y] == 0:
+                continue
+            r, g, b, a = px[x, y]
+            if a >= 250 and max(r, g, b) - min(r, g, b) >= 0.18 * 255:
+                L = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+                n += 1
+                c0 += abs(L - back_l)
+                c1 += abs(L - LIGHT_MID_L)
+    if n > 0.01 * TILE * TILE and c1 < 0.3 * n and c1 < 0.7 * c0:
+        return None
+    k = light_k(back_l)
+    return remap(layer, lambda c: light_px(c, k))
+
+# --- artwork on its own neutral tile -> the standard tile ---------------------
+def terms(x, y):
+    u, v = (x - C / 2) / (C / 2), (y - C / 2) / (C / 2)
+    return (1.0, u, v, u * u, v * v, u * v)
+
+def solve(a, b):
+    """Gauss-Jordan with partial pivoting: x with a x = b."""
+    n = len(b)
+    m = [row[:] + [b[i]] for i, row in enumerate(a)]
+    for c in range(n):
+        p = max(range(c, n), key=lambda r: abs(m[r][c]))
+        m[c], m[p] = m[p], m[c]
+        for r in range(n):
+            if r != c:
+                k = m[r][c] / m[c][c]
+                m[r] = [u - k * w for u, w in zip(m[r], m[c])]
+    return [m[i][n] / m[i][i] for i in range(n)]
+
+def surface(pts):
+    """least-squares quadratic surface in x and y through (x, y, rgb) points,
+    per channel: a gradient in any direction, and one that darkens faster
+    towards an edge (Proton Authenticator's)."""
+    a = [[0.0] * 6 for _ in range(6)]
+    b = [[0.0] * 6 for _ in range(3)]
+    for x, y, c in pts:
+        t = terms(x, y)
+        for i in range(6):
+            for j in range(6):
+                a[i][j] += t[i] * t[j]
+            for k in range(3):
+                b[k][i] += t[i] * c[k]
+    return [solve(a, b[k]) for k in range(3)]
+
+def at(fit, x, y):
+    t = terms(x, y)
+    return tuple(min(255.0, max(0.0, sum(u * w for u, w in zip(f, t)))) for f in fit)
+
+def backdrop(layer):
+    """The artwork's own tile as a smooth surface, fitted to the band just
+    inside the squircle edge, then refitted without the art it caught there.
+    None unless nearly all of that band sits on the fit: a smooth tile, not
+    cover art or a busy edge."""
+    px, rp = layer.load(), RIM_BAND_MASK.load()
+    samples = [(x, y, px[x, y][:3])
+               for y in range(MARGIN, MARGIN + TILE, 2) for x in range(MARGIN, MARGIN + TILE, 2)
+               if rp[x, y] >= 200 and px[x, y][3] >= 250]
+    if len(samples) < 100:
+        return None
+    keep = samples
+    for _ in range(2):
+        fit = surface(keep)
+        keep = [p for p in samples
+                if max(abs(a - b) for a, b in zip(p[2], at(fit, p[0], p[1]))) <= 10]
+        if len(keep) < 0.85 * len(samples):
+            return None
+    return fit
+
+def retile(layer, back, variant, f=None):
+    """Map the artwork's colours through f (darkify's or lightify's map, or
+    none), then move whatever shows its own tile onto the standard one: each
+    pixel shifts by the gap between the standard tile and f(own tile), times
+    how much of the pixel is tile (1 - alpha, colour to alpha against the
+    fitted gradient `back`). Art keeps its mapped colour; a pale pastel stays
+    pale instead of turning into a see-through colour, which the dark tile
+    would show through."""
+    out = layer.copy()
+    px, mp, T = out.load(), MASK.load(), TILE_ROW[variant]
+    for y in range(MARGIN, MARGIN + TILE):
+        Ty = T[y]
+        for x in range(MARGIN, MARGIN + TILE):
+            if mp[x, y] == 0:
+                continue
+            B = at(back, x, y)
+            r, g, b, a = px[x, y]
+            # how opaque art over B would have to be to give this pixel; a few
+            # levels of slack keep bitmap noise in the tile from speckling it
+            al = 0.0
+            for v, k in zip((r, g, b), B):
+                d = abs(v - k) - 3
+                if d > 0:
+                    al = max(al, d / ((255 - k) if v > k else k))
+            if al <= 0.0:
+                col = Ty
+            else:
+                al = min(al, 1.0)
+                fp, fb = (f((r, g, b)), f(B)) if f is not None else ((r, g, b), B)
+                col = tuple(p + (1 - al) * (t - q) for p, t, q in zip(fp, Ty, fb))
+            px[x, y] = tuple(min(255, max(0, round(v))) for v in col) + (a,)
+    return out
+
+def tone(lum):
+    """which standard tile a neutral backdrop of this luma belongs on, if any."""
+    return 'light' if lum > 0.8 else 'dark' if lum < 0.45 else None
+
+def prepare(glyph, name):
     """classify once; return (light_icon, dark_icon, glyph). The two icons are
-    the same object unless the artwork supplies its own light backdrop."""
+    the same object unless the artwork supplies its own neutral backdrop."""
     bbox = glyph.getbbox()
     if bbox:
         glyph = glyph.crop(bbox)
@@ -725,15 +932,28 @@ def prepare(glyph):
                 layer.paste(bleed_backdrop(glyph), (MARGIN, MARGIN))
             layer.alpha_composite(cover_resize(glyph, TILE), (MARGIN, MARGIN))
         layer.putalpha(ImageChops.multiply(layer.getchannel('A'), MASK))
-        base = Image.alpha_composite(SHADOW, layer)
-        light = Image.alpha_composite(base, BORDER_DARKLINE)
-        if rim_is_light_neutral(layer):
-            # its own backdrop was a white tile: re-tone it, then rim it
-            dark = Image.alpha_composite(
-                Image.alpha_composite(SHADOW, darkify(layer)), RIM_GLOW)
-        else:
-            # brand artwork: same pixels as the light icon, but rimmed
-            dark = Image.alpha_composite(base, RIM_GLOW)
+        stats = rim_stats(layer)
+        # a smooth neutral tile of its own (Proton Pass's white, haruna's
+        # graphite) is swapped for the standard one; brand colours and cover
+        # art keep theirs
+        own = tone(stats[1]) if stats[0] >= 100 and stats[3] < 0.12 else None
+        back = backdrop(layer) if own else None
+        light = dark = layer
+        lit = (lightify(layer, stats[1])
+               if rim_is_dark_neutral(stats) and name not in KEEP_DARK else None)
+        if lit is not None:
+            # its own backdrop was a graphite tile: white in the light theme
+            k = light_k(stats[1])
+            light = retile(layer, back, 'light', lambda c: light_px(c, k)) if back else lit
+        elif back:
+            light = retile(layer, back, own)
+        if rim_is_light_neutral(stats):
+            # its own backdrop was a white tile: re-tone it
+            dark = retile(layer, back, 'dark', dark_px) if back else darkify(layer)
+        elif back:
+            dark = retile(layer, back, own)
+        light = Image.alpha_composite(Image.alpha_composite(SHADOW, light), BORDER_DARKLINE)
+        dark = Image.alpha_composite(Image.alpha_composite(SHADOW, dark), RIM_GLOW)
         return light, dark, None
     # 3. shaped / transparent logo: it gets centred on a per-variant tile.
     scale = min(GLYPH_BOX / w, GLYPH_BOX / h)
@@ -755,7 +975,7 @@ for line in open(worklist):
         continue
     name, src = line.split('\t', 1)
     try:
-        prepared = prepare(load_512(src))
+        prepared = prepare(load_512(src), name)
         for variant, out_dir in (('light', light_dir), ('dark', dark_dir)):
             icon = compose(prepared, variant)
             for s in SIZES:
@@ -882,7 +1102,7 @@ def add_sheen(out, gid, block):
 # A few white tiles (Firefox, Inkscape, Edge, ...) have their edge lit by an
 # all-white ramp that is opaque at both ends and dim in the middle, drawn by one
 # or two paths through gradients that href it. Meant for the white tile, it
-# turns into a hard white outline on the dark one, so it goes; 5d gives these
+# turns into a hard white outline on the dark one, so it goes; 5e gives these
 # icons the same corner rim as every other dark tile.
 TAG = re.compile(r'<(?:linear|radial)Gradient\b[^>]*>')
 STOP_COL = re.compile(r'stop-color[=:]\s*"?(#[0-9a-fA-F]{3,6})')
@@ -1083,12 +1303,805 @@ then
   echo "  warning: dark Finder skipped (see above); the build continues" >&2
 fi
 
-# --- 5d. Tahoe corner rim on every dark app SVG -------------------------------
+# --- 5d. One shadow under every tile; light tiles in the light theme ----------
+# MacTahoe draws each app's shadow its own way (an embedded PNG, stacks of faint
+# rings, a blurred black rect, or nothing at all for VS Code and Obsidian), so
+# no two match, and none match step 5's. For every app SVG that fills the
+# squircle, the tile is found by rendering: the first element that leaves the
+# squircle opaque. Whatever is drawn before it can only show outside the tile,
+# i.e. it is the shadow; it goes, and step 5's shadow goes under everything.
+# The light theme also gets step 5's outline on top, and its neutral dark tiles
+# (kitty, VS Code, terminals, ...) take the light ramp, with white glyphs made
+# dark where they would vanish. Every other neutral tile, in both themes, is
+# repainted with step 5's light or dark ramp: MacTahoe's own come in a dozen
+# whites, greys and blacks. Every edit is re-rendered: the tile interior must
+# come out unchanged (bar the tile's own colour) and art poking outside the
+# tile must survive, or the icon stays exactly as MacTahoe drew it.
+# Runs before 5e's rim, so the dark theme's untouched SVGs are still identical
+# to the light theme's and reuse its result instead of being worked out again.
+python3 - "$THEME_LIGHT/apps/scalable" "$THEME_DARK/apps/scalable" \
+         "$LIGHT_TILE_TOP" "$LIGHT_TILE_BOT" "$TILE_SHADOW_ALPHA" "$TILE_SHADOW_BLUR" \
+         "$TILE_SHADOW_DROP" "$TILE_OUTLINE_ALPHA" "$KEEP_DARK_FILE" \
+         "$DARK_TILE_TOP" "$DARK_TILE_BOT" "$DARK_TILE_HL" "$DARK_TILE_HL_SPAN" <<'PYEOF'
+import base64, functools, hashlib, io, os, re, subprocess, sys, xml.parsers.expat
+from concurrent.futures import ThreadPoolExecutor
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
+
+light_dir, dark_dir = sys.argv[1], sys.argv[2]
+
+def rgb(h):
+    h = h.lstrip('#')
+    if len(h) == 3:
+        h = ''.join(c * 2 for c in h)
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+def luma(c):
+    return (0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]) / 255
+
+def sat(c):
+    return (max(c) - min(c)) / max(c) if max(c) else 0.0
+
+HI, LO = rgb(sys.argv[3]), rgb(sys.argv[4])      # light tile top, bottom
+SHADOW_A, SHADOW_BLUR, SHADOW_DROP = (int(v) for v in sys.argv[5:8])
+OUTLINE_A = int(sys.argv[8])
+DHI, DLO = rgb(sys.argv[10]), rgb(sys.argv[11])  # dark tile top, bottom
+DHL, DHL_SPAN = float(sys.argv[12]), float(sys.argv[13])
+
+def keep_dark(path):
+    """keep-dark.conf names as file names in the light theme, aliases resolved
+    to the SVG they point to (that file is the one that gets recoloured)."""
+    try:
+        with open(path, encoding='utf-8') as f:
+            names = {ln.split('#', 1)[0].strip() for ln in f} - {''}
+    except OSError:
+        return set()
+    out = set()
+    for n in names:
+        p = os.path.join(light_dir, n + '.svg')
+        out.add(os.path.basename(os.path.realpath(p)) if os.path.lexists(p) else n + '.svg')
+    return out
+
+KEEP = keep_dark(sys.argv[9])
+
+# --- analysis renders: 128 px, so the 64-grid is 2 px per unit ----------------
+N, K = 128, 2
+# int(), not round(): 59.4 must stay off the tile's antialiased last pixel
+PROBE = [(int(x * K), int(y * K)) for x, y in
+         ((32, 4.6), (32, 59.4), (4.6, 32), (59.4, 32),     # just inside each edge
+          (10, 10), (54, 10), (10, 54), (54, 54))]          # inside the corners
+
+def squircle(grow):
+    m = Image.new('L', (N, N), 0)
+    ImageDraw.Draw(m).rounded_rectangle(
+        [4 * K - grow, 4 * K - grow, 60 * K - 1 + grow, 60 * K - 1 + grow],
+        radius=13 * K + grow, fill=255)
+    return m
+
+INSIDE = squircle(-2)                        # clear of the antialiased edge
+OUTSIDE = ImageChops.invert(squircle(2))
+# beyond any tile: some are a little squarer or off the grid than the squircle
+# (a flickr tile has radius 10), but a full-square shadow reaches ~11 px out
+FAR = ImageChops.invert(squircle(4))
+BAND_IM = ImageChops.subtract(squircle(-1), squircle(-5))
+BAND, BAND_AREA = BAND_IM.load(), BAND_IM.histogram()[255]
+IN = INSIDE.load()
+AREA = INSIDE.histogram()[255]
+
+def render(b):
+    try:
+        r = subprocess.run(['rsvg-convert', '-w', str(N), '-h', str(N)], input=b,
+                           check=True, capture_output=True)
+        return Image.open(io.BytesIO(r.stdout)).convert('RGBA')
+    except Exception:
+        return None
+
+def opaque(im):
+    return im is not None and all(im.getpixel(p)[3] >= 250 for p in PROBE)
+
+def over(im, cut):
+    return im.point(lambda v: 255 if v > cut else 0)
+
+def changed(a, b, tol):
+    """255 wherever any channel moved by more than tol."""
+    return over(functools.reduce(ImageChops.lighter, ImageChops.difference(a, b).split()), tol)
+
+def hits(mask, region):
+    return ImageChops.multiply(mask, region).getbbox() is not None
+
+def points(mask):
+    """(x, y) of every set pixel of a 0/255 mask."""
+    px = mask.load()
+    return [(x, y) for y in range(N) for x in range(N) if px[x, y]]
+
+# --- the SVG as byte spans ----------------------------------------------------
+# expat for the structure, but every edit is a splice of the original bytes, so
+# nothing else in the file (namespaces, entities, formatting) is touched.
+DRAW = {'path', 'rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon',
+        'image', 'use', 'g', 'text', 'a', 'switch', 'svg'}
+START_TAG = re.compile(rb'<[^\s/>]+(?:\s+[^\s=/>]+\s*=\s*(?:"[^"]*"|\'[^\']*\'))*\s*/?>')
+
+class Node:
+    __slots__ = ('tag', 'attrs', 'start', 'end', 'kids', 'parent')
+
+    def __init__(self, tag, attrs, start, parent):
+        self.tag, self.attrs, self.start, self.parent = tag, attrs, start, parent
+        self.end, self.kids = None, []
+
+def tag_end(b, i):
+    m = START_TAG.match(b, i)
+    if not m:
+        raise ValueError('unparsable tag at %d' % i)
+    return m.end()
+
+def parse(b):
+    p = xml.parsers.expat.ParserCreate()
+    stack, root = [], []
+
+    def start(tag, attrs):
+        tag = tag[4:] if tag.startswith('svg:') else tag
+        n = Node(tag, attrs, p.CurrentByteIndex, stack[-1] if stack else None)
+        (stack[-1].kids if stack else root).append(n)
+        stack.append(n)
+
+    def end(_):
+        n = stack.pop()
+        e = tag_end(b, n.start)
+        if b[e - 2:e] == b'/>':
+            n.end = e
+        else:
+            # expat reports a self-closing tag's end one byte on, which is why
+            # that case is read off the start tag above instead
+            i = p.CurrentByteIndex
+            if not b.startswith(b'</', i):
+                raise ValueError('end tag not at %d' % i)
+            n.end = b.index(b'>', i) + 1
+    p.StartElementHandler, p.EndElementHandler = start, end
+    p.Parse(b, True)
+    return root[0] if root and root[0].tag == 'svg' else None
+
+def cut(b, spans):
+    out, last = [], 0
+    for s, e in sorted(spans):
+        out.append(b[last:s])
+        last = e
+    return b''.join(out) + b[last:]
+
+def drawables(n):
+    return [k for k in n.kids if k.tag in DRAW]
+
+def has_effect(n):
+    """a group effect that changes how its children composite. A clip-path
+    doesn't: it only cuts them (Figma exports wrap the whole icon in one)."""
+    st = n.attrs.get('style', '')
+    return any(n.attrs.get(k, 'none') != 'none'
+               or re.search(r'(?:^|;)\s*%s\s*:\s*(?!none)' % k, st)
+               for k in ('filter', 'mask', 'opacity'))
+
+def siblings(path, after):
+    out = []
+    for n in path:
+        sib = drawables(n.parent)
+        i = sib.index(n)
+        out += [(x.start, x.end) for x in (sib[i + 1:] if after else sib[:i])]
+    return out
+
+def find_tile(b, root):
+    """Nodes from the <svg> down to the tile: at each level the first element
+    whose prefix of the drawing is opaque at every probe. Plain groups are
+    entered to find the tile inside them. [] when nothing covers the tile."""
+    path, level, later = [], root, []
+    while True:
+        kids = drawables(level)
+        i = next((i for i in range(len(kids)) if opaque(render(
+            cut(b, [(x.start, x.end) for x in kids[i + 1:]] + later)))), None)
+        if i is None:
+            return path
+        k = kids[i]
+        path.append(k)
+        later += [(x.start, x.end) for x in kids[i + 1:]]
+        if k.tag != 'g' or not drawables(k) or has_effect(k):
+            return path
+        level = k
+
+def user_space(root):
+    """(kx, ky, ox, oy) mapping the 64-grid onto the file's user space."""
+    vb = root.attrs.get('viewBox')
+    try:
+        if vb:
+            p = [float(v) for v in vb.replace(',', ' ').split()]
+            if len(p) == 4 and p[2] > 0 and p[3] > 0:
+                return p[2] / 64.0, p[3] / 64.0, p[0], p[1]
+            return None
+        w = float(re.sub(r'[a-z%]+$', '', root.attrs.get('width', '')))
+        h = float(re.sub(r'[a-z%]+$', '', root.attrs.get('height', '')))
+    except ValueError:
+        return None
+    return (w / 64.0, h / 64.0, 0.0, 0.0) if w > 0 and h > 0 else None
+
+def in_space(markup, sp):
+    if sp != (1.0, 1.0, 0.0, 0.0):
+        markup = '<g transform="translate(%.6g %.6g) scale(%.6g %.6g)">%s</g>' % (
+            sp[2], sp[3], sp[0], sp[1], markup)
+    return markup.encode()
+
+# --- shadow and outline markup ------------------------------------------------
+def shadow_png():
+    """step 5's SHADOW, drawn the same way, as a 128 px data URI."""
+    c = 512
+    m = Image.new('L', (c, c), 0)
+    ImageDraw.Draw(m).rounded_rectangle([32, 32, 479, 479], radius=104, fill=255)
+    a = Image.new('L', (c, c), 0)
+    a.paste(SHADOW_A, (0, SHADOW_DROP), m.filter(ImageFilter.GaussianBlur(SHADOW_BLUR)))
+    a = a.resize((128, 128), Image.LANCZOS)
+    buf = io.BytesIO()
+    Image.merge('LA', (Image.new('L', a.size, 0), a)).save(buf, 'PNG', optimize=True)
+    return 'data:image/png;base64,' + base64.b64encode(buf.getvalue()).decode()
+
+# A bitmap rather than a blur filter, so every renderer draws the same pixels
+# as the generated icons. xmlns:xlink is declared on the element itself: many
+# of these files never declare it, and an undeclared prefix is a parse error.
+SHADOW_EL = ('<image xmlns:xlink="http://www.w3.org/1999/xlink" id="tahoeShadow" '
+             'width="64" height="64" preserveAspectRatio="none" '
+             'href="{0}" xlink:href="{0}"/>').format(shadow_png())
+# step 5's 2 px border, i.e. a quarter unit just inside the squircle
+OUTLINE_EL = ('<rect id="tahoeOutline" width="55.75" height="55.75" x="4.125" y="4.125" '
+              'rx="12.875" ry="12.875" fill="none" stroke="#000" '
+              'stroke-opacity="%.4g" stroke-width=".25"/>' % (OUTLINE_A / 255))
+
+def reshadow(b):
+    """-> (bytes, None) with MacTahoe's shadow swapped for ours, or (None, why)."""
+    if b'tahoeShadow' in b:
+        return None, 'done'
+    root = parse(b)
+    sp = user_space(root) if root is not None else None
+    orig = render(b)
+    if sp is None or not opaque(orig):
+        return None, 'shape'
+    path = find_tile(b, root)
+    if not path:
+        return None, 'shape'
+    nb = cut(b, siblings(path, after=False))
+    new = render(nb)
+    if new is None or hits(changed(orig, new, 8), INSIDE):
+        return None, 'kept'           # the tile itself changed: leave it be
+    lost = ImageChops.subtract(over(orig.getchannel('A'), 200), over(new.getchannel('A'), 200))
+    if hits(lost, OUTSIDE):
+        return None, 'kept'           # art drawn under the tile pokes out of it
+    at = tag_end(nb, root.start)      # first thing drawn = bottom of the stack
+    return nb[:at] + in_space(SHADOW_EL, sp) + nb[at:], None
+
+# --- neutral dark tile -> light tile (light theme) ----------------------------
+COLOR = re.compile(rb'((?<![\w-])(?:fill|stroke|stop-color|color)\s*[=:]\s*"?\s*)'
+                   rb'(#[0-9a-fA-F]{6}\b|#[0-9a-fA-F]{3}\b|white\b)')
+
+def rim(im):
+    """mean (luma, saturation) of the band just inside the squircle edge."""
+    px = im.load()
+    n = sl = ss = 0.0
+    for y in range(0, N, 2):
+        for x in range(0, N, 2):
+            if BAND[x, y] >= 200 and px[x, y][3] >= 250:
+                n += 1
+                sl += luma(px[x, y])
+                ss += sat(px[x, y][:3])
+    return (sl / n, ss / n) if n else (1.0, 1.0)
+
+def by_id(root, gid):
+    stack = [root]
+    while stack:
+        n = stack.pop()
+        if n.attrs.get('id') == gid:
+            return n
+        stack += n.kids
+    return None
+
+# --- the standard tile --------------------------------------------------------
+# MacTahoe's neutral tiles come in a dozen shades (flat white, cool greys, three
+# graphites, black), and step 5's generated ones in one. A neutral tile gets
+# step 5's ramp as a fresh gradient, whatever its paint was: darker/lighter
+# stops mapped one by one would keep a flat tile flat.
+RAMP = {'light': (HI, LO, 0.0, 1.0), 'dark': (DHI, DLO, DHL, DHL_SPAN)}
+
+def ramp_at(which, t):
+    top, bot, hl, span = RAMP[which]
+    col = [a + (c - a) * t for a, c in zip(top, bot)]
+    a = hl * max(0.0, 1.0 - t / span)             # the dark tile's top sheen
+    return tuple(round(c + (255 - c) * a) for c in col)
+
+def expect(which):
+    im = Image.new('RGB', (N, N))
+    px = im.load()
+    for y in range(N):
+        col = ramp_at(which, min(max((y + 0.5 - 4 * K) / (56 * K), 0.0), 1.0))
+        for x in range(N):
+            px[x, y] = col
+    return im
+
+EXPECT = {w: expect(w) for w in RAMP}
+
+def off_ramp(im, which):
+    """mean distance (0-255) from the standard ramp along the band inside the
+    tile's edge: top, bottom and sides, clear of art, holes in the tile, ..."""
+    d = functools.reduce(ImageChops.lighter,
+                         ImageChops.difference(im.convert('RGB'), EXPECT[which]).split())
+    return sum(i * n for i, n in enumerate(ImageChops.multiply(d, BAND_IM).histogram())) / BAND_AREA
+
+def ramp_stops(which):
+    # the sheen bends the dark ramp over its top part, so that part gets stops
+    span = RAMP[which][3]
+    ts = [0.0, 1.0] if RAMP[which][2] == 0 else [span * i / 8 for i in range(9)] + [1.0]
+    return ''.join('<stop offset="%.4g" stop-color="#%02x%02x%02x"/>' % ((t,) + ramp_at(which, t))
+                   for t in ts)
+
+STYLE = re.compile(rb'((?<![\w-])style\s*=\s*")([^"]*)(")')
+STYLE_FILL = re.compile(rb'(?:^|;)\s*fill\s*:\s*([^;]*)')
+SHAPES = {'path', 'rect', 'circle', 'ellipse', 'polygon'}
+
+def set_tile(b, tile, which, geom):
+    """-> (bytes, shift): the tile element filled with a new tahoeTile
+    gradient, and how far everything after its start tag moved. The fill goes
+    in its style, which beats a presentation attribute and a CSS class; the
+    gradient goes last in the file, so every other node keeps its place in
+    document order (glyphs() and darken() count on that)."""
+    s, e = tile.start, tag_end(b, tile.start)
+    tag, url = b[s:e], b'url(#tahoeTile)'
+    m = STYLE.search(tag)
+    if m:
+        body = m.group(2)
+        f = STYLE_FILL.search(body)
+        if f:
+            body = body[:f.start(1)] + url + body[f.end(1):]
+        else:
+            body = (body.rstrip().rstrip(b';') + b';' if body.strip() else b'') + b'fill:' + url
+        tag = tag[:m.start(2)] + body + tag[m.end(2):]
+    else:
+        at = len(tag) - (2 if tag.endswith(b'/>') else 1)
+        tag = tag[:at] + b' style="fill:' + url + b'"' + tag[at:]
+    nb = b[:s] + tag + b[e:]
+    at = nb.rstrip().rfind(b'</svg>')
+    grad = '<linearGradient id="tahoeTile" %s>%s</linearGradient>' % (geom, ramp_stops(which))
+    return nb[:at] + grad.encode() + nb[at:], len(tag) - (e - s)
+
+def tile_parts(b, path):
+    """-> (the element that paints the tile, spans drawn after it, 5b's sheen
+    over it or None). A clipped or filtered group's tile is its first shape."""
+    tile, later = path[-1], siblings(path, after=True)
+    if tile.tag == 'g':
+        # find_tile's test inside the group: the first child that covers the
+        # tile (what comes before it can be a shadow under it)
+        kids = drawables(tile)
+        i = next((i for i in range(len(kids)) if opaque(render(
+            cut(b, later + [(k.start, k.end) for k in kids[i + 1:]])))), None)
+        if i is None:
+            return None, later, None
+        later += [(k.start, k.end) for k in kids[i + 1:]]
+        tile = kids[i]
+    if tile.tag not in SHAPES:
+        return None, later, None
+    sib = drawables(tile.parent)
+    i = sib.index(tile) + 1
+    glass = sib[i] if i < len(sib) and b'tahoeGlass' in b[sib[i].start:tag_end(b, sib[i].start)] \
+        else None
+    if glass is not None:
+        later.remove((glass.start, glass.end))
+    return tile, later, glass
+
+def restyle(b, root, tile, later, glass, which):
+    """-> (bytes, tile-only render) with the tile on the standard ramp (and
+    5b's sheen gone: the dark ramp carries its own), or (None, None) when no
+    gradient geometry puts it there. The tile's bounding box is tried first,
+    either way up (a flipped transform flips it), then the 64-grid in the
+    file's user space (a tile larger than the squircle)."""
+    sp = user_space(root)
+    if b'tahoeTile' in b or sp is None:
+        return None, None
+    x = sp[2] + 32 * sp[0]
+    for geom in ('x1="0" y1="0" x2="0" y2="1"', 'x1="0" y1="1" x2="0" y2="0"',
+                 'x1="%.6g" y1="%.6g" x2="%.6g" y2="%.6g" gradientUnits="userSpaceOnUse"'
+                 % (x, sp[3] + 4 * sp[1], x, sp[3] + 60 * sp[1])):
+        nb, shift = set_tile(b, tile, which, geom)
+        gone = [(glass.start + shift, glass.end + shift)] if glass is not None else []
+        t = render(cut(nb, gone + [(s + shift, e + shift) for s, e in later]))
+        if t is not None and opaque(t) and off_ramp(t, which) <= 3:
+            return cut(nb, gone), t
+    return None, None
+
+def standard(b):
+    """-> (bytes, 'light' | 'dark') with a neutral tile repainted with the
+    standard ramp, or (None, why). Every pixel may move at most as far as the
+    tile under it did: art drawn over the tile keeps its colours, and anything
+    blended with it (overlay, multiply) sends the icon back unchanged."""
+    if b'tahoeTile' in b:
+        return None, 'standard'
+    orig = render(b)
+    if not opaque(orig):
+        return None, 'shape'
+    lum, s = rim(orig)
+    which = 'light' if lum > 0.8 else 'dark' if lum < 0.45 else None
+    if s >= 0.12 or which is None:
+        return None, 'brand'
+    root = parse(b)
+    path = find_tile(b, root)
+    if not path:
+        return None, 'shape'
+    tile, later, glass = tile_parts(b, path)
+    if tile is None:
+        return None, 'paint'
+    t0 = render(cut(b, later))                # the tile, with 5b's sheen if any
+    if t0 is None:
+        return None, 'paint'
+    # the tile's own paint, art aside, must be neutral all over: a white that
+    # fades to cyan (linuxthemestore) or a lilac one (gpodder) is a design, not
+    # a shade of the tile. Chroma in levels, not saturation, which blows up on
+    # near-black; the top 10% allows for antialiased edges
+    px = t0.load()
+    ch = sorted(max(p[:3]) - min(p[:3]) for y in range(0, N, 2) for x in range(0, N, 2)
+                if BAND[x, y] >= 200 and (p := px[x, y])[3] >= 250)
+    if not ch or ch[int(0.9 * len(ch))] > 12:
+        return None, 'brand'
+    if off_ramp(t0, which) <= 3:
+        return None, 'standard'
+    nb, t1 = restyle(b, root, tile, later, glass, which)
+    if nb is None:
+        return None, 'paint'
+    after = render(nb)
+    if after is None or hits(changed(after, orig, 3), FAR):
+        return None, 'paint'                  # what got repainted was not the tile
+    moved = ImageChops.subtract(ImageChops.difference(after.convert('RGB'), orig.convert('RGB')),
+                                ImageChops.difference(t1.convert('RGB'), t0.convert('RGB')))
+    if hits(over(functools.reduce(ImageChops.lighter, moved.split()), 8), INSIDE):
+        return None, 'paint'
+    return nb, which
+
+def preorder(root):
+    out, stack = [], [root]
+    while stack:
+        n = stack.pop()
+        out.append(n)
+        stack += reversed(n.kids)
+    return out
+
+def artwork(root):
+    """drawn nodes, i.e. none inside defs, masks, clip paths or filters, where
+    white means coverage rather than colour."""
+    out, stack = [], [root]
+    while stack:
+        n = stack.pop()
+        if n.tag in ('defs', 'mask', 'clipPath', 'filter', 'pattern', 'symbol'):
+            continue
+        if n.tag in DRAW and n is not root:
+            out.append(n)
+        stack += n.kids
+    return out
+
+def stops(root, n):
+    """the gradient that actually holds the stops for gradient node n."""
+    for _ in range(4):
+        if n is None or n.kids:
+            break
+        h = n.attrs.get('xlink:href') or n.attrs.get('href') or ''
+        n = by_id(root, h[1:]) if h.startswith('#') else None
+    return n if n is not None and n.tag.endswith('Gradient') else None
+
+def refs(n):
+    """ids of the gradients node n fills or strokes with."""
+    vals = [n.attrs.get('fill', ''), n.attrs.get('stroke', '')]
+    vals += re.findall(r'(?:^|;)\s*(?:fill|stroke)\s*:\s*([^;]+)', n.attrs.get('style', ''))
+    return [m.group(1) for m in (re.match(r'\s*url\(#([^)]+)\)', v) for v in vals) if m]
+
+def colours(b, s, e):
+    return [(255, 255, 255) if c == b'white' else rgb(c.decode())
+            for _, c in COLOR.findall(b[s:e])]
+
+def light_neutral(c):
+    return sat(c) <= 0.15 and luma(c) >= 0.6
+
+def footprint(full, without):
+    return points(ImageChops.multiply(changed(full, without, 24), INSIDE))
+
+def pale(p):
+    return sat(p[:3]) < 0.2 and luma(p) > 0.6
+
+def glyphs(b, root, orig, t0):
+    """Nodes (by preorder index) that paint a light neutral glyph onto the tile:
+    kitty's prompt, a white logo, or the stacked light layers of one (a face
+    over its bevel). Left alone: light detail over coloured art (the whites of
+    the cat's eyes), which still contrasts with what is under it; white objects
+    with coloured detail on top (an eyeball and its iris), which would turn
+    into dark blobs; and faint white sheens, which are not glyphs."""
+    order = {id(n): i for i, n in enumerate(preorder(root))}
+    po, pt = orig.load(), t0.load()
+    picked = set()
+    for n in artwork(root):
+        own = colours(b, n.start, tag_end(b, n.start))
+        grads = [stops(root, by_id(root, r)) for r in refs(n)]
+        if not (any(light_neutral(c) for c in own) or any(
+                g is not None and all(light_neutral(c) for c in colours(b, g.start, g.end))
+                for g in grads)):
+            continue
+        without = render(cut(b, [(n.start, n.end)]))
+        if without is None:
+            continue
+        pw = without.load()
+        f = footprint(orig, without)
+        if len(f) < 16:
+            continue
+        lit = sum(1 for x, y in f if pale(po[x, y]))
+        # under it: the bare tile, or another light layer of the same glyph
+        bare = sum(1 for x, y in f if pale(pw[x, y])
+                   or max(abs(pw[x, y][i] - pt[x, y][i]) for i in range(3)) <= 24)
+        if lit < 0.5 * len(f) or bare < 0.6 * len(f):
+            continue
+        # what later art hides of it, drawn without that art
+        chain, a = [], n
+        while a is not root:
+            chain.append(a)
+            a = a.parent
+        later = siblings(chain, after=True)
+        alone, gone = render(cut(b, later)), render(cut(b, later + [(n.start, n.end)]))
+        if alone is None or gone is None:
+            continue
+        full = footprint(alone, gone)
+        seen = set(f)
+        hidden = sum(1 for p in full if p not in seen and not pale(po[p]))
+        if hidden <= 0.15 * len(full):
+            picked.add(order[id(n)])
+    return picked
+
+def darken(b, root, picked):
+    """Recolour the picked nodes' light neutral paints near-black, in their own
+    start tag and in any gradient that only picked nodes use."""
+    nodes = preorder(root)
+    users = {}
+    for i, n in enumerate(nodes):
+        for r in refs(n):
+            g = stops(root, by_id(root, r))
+            if g is not None:
+                users.setdefault(id(g), (g, set()))[1].add(i)
+    spans = [(nodes[i].start, tag_end(b, nodes[i].start)) for i in picked]
+    spans += [(g.start, g.end) for g, us in users.values() if us <= picked]
+
+    def one(m):
+        tok = m.group(2)
+        c = (255, 255, 255) if tok == b'white' else rgb(tok.decode())
+        if not light_neutral(c):
+            return m.group(0)
+        v = round(255 * (0.11 + (1.0 - luma(c)) * 0.95))     # white -> #1c1c1c
+        return m.group(1) + b'#%02x%02x%02x' % (v, v, v)
+    out, last = [], 0
+    for s, e in sorted(set(spans)):
+        if s < last:
+            continue                        # nested in a span already done
+        out += [b[last:s], COLOR.sub(one, b[s:e])]
+        last = e
+    return b''.join(out) + b[last:]
+
+OPACITY = re.compile(rb'(?<![\w-])(opacity\s*[=:]\s*"?\s*)([\d.eE+-]+)')
+
+def soften_shadows(b, k):
+    """Translucent layers that darken the bare tile evenly are shadows meant
+    for the graphite tile, where they barely show; on white they turn into grey
+    smudges (VS Code's logo). Scale their opacity by k, the dark/light tile
+    luminance ratio, so they read as faintly as they used to."""
+    root = parse(b)
+    path = find_tile(b, root)
+    full = render(b)
+    if not path or full is None:
+        return b
+    t1 = render(cut(b, siblings(path, after=True)))
+    if t1 is None:
+        return b
+    t1, pf = t1.load(), full.load()
+    edits = []
+    for n in artwork(root):
+        if n.start < path[-1].end or drawables(n):
+            continue                        # the tile, or a group: its leaves decide
+        without = render(cut(b, [(n.start, n.end)]))
+        if without is None:
+            continue
+        pw = without.load()
+        f = points(ImageChops.multiply(changed(full, without, 3), INSIDE))
+        if len(f) < 16:
+            continue
+        even = bare = 0
+        for x, y in f:
+            p, q = pf[x, y], pw[x, y]
+            bare += max(abs(q[i] - t1[x, y][i]) for i in range(3)) <= 24
+            if min(q[:3]) >= 40:
+                a = [1.0 - p[i] / q[i] for i in range(3)]
+                even += 0.0 <= min(a) and max(a) < 0.6 and max(a) - min(a) < 0.06
+        if even >= 0.85 * len(f) and bare >= 0.6 * len(f):
+            edits.append(n)
+    for n in sorted(edits, key=lambda n: -n.start):
+        e = tag_end(b, n.start)
+        tag = b[n.start:e]
+        m = OPACITY.search(tag)
+        if m:
+            tag = tag[:m.start(2)] + b'%.3g' % (float(m.group(2)) * k) + tag[m.end(2):]
+        else:
+            at = len(tag) - (2 if tag.endswith(b'/>') else 1)
+            tag = tag[:at] + b' opacity="%.3g"' % k + tag[at:]
+        b = b[:n.start] + tag + b[e:]
+    return b
+
+def neutral_art(im, art):
+    """Neutral artwork: (light share, dark share) of the tile area, and the
+    share of light pixels that border the bare tile -- a white glyph that
+    vanishes on white, as opposed to white detail inside coloured art."""
+    px = im.load()
+    inart = set(art)
+    lt = dk = edge = 0
+    for x, y in art:
+        p = px[x, y][:3]
+        if sat(p) >= 0.2:
+            continue
+        L = luma(p)
+        dk += L < 0.35
+        if L > 0.6:
+            lt += 1
+            edge += any((q not in inart) and IN[q] for q in
+                        ((x - 2, y), (x + 2, y), (x, y - 2), (x, y + 2))
+                        if 0 <= q[0] < N and 0 <= q[1] < N)
+    return lt / AREA, dk / AREA, edge / AREA
+
+def contrast(im, tile, region):
+    a, t = im.load(), tile.load()
+    return sum(abs(luma(a[x, y]) - luma(t[x, y])) for x, y in region) / len(region)
+
+def lighten(b):
+    """-> (bytes, 'lit' | 'lit+glyphs') or (None, why); why 'no' = not a
+    neutral dark tile at all."""
+    orig = render(b)
+    lum, s = rim(orig)
+    if not (lum < 0.45 and s < 0.12):
+        return None, 'no'
+    root = parse(b)
+    path = find_tile(b, root)
+    if not path:
+        return None, 'paint'
+    # only a tile that is a shape of its own: the art checks below take the
+    # tile's whole subtree as "the tile", which a group's first shape is not
+    tile, later, _ = tile_parts(b, path)
+    nb = restyle(b, root, tile, later, None, 'light')[0] if tile is path[-1] else None
+    if nb is None:
+        return None, 'paint'                  # a pattern, a bitmap, ...
+    after = render(nb)
+    if after is None or rim(after)[0] < 0.8:
+        return None, 'paint'                  # overlays keep the edge dark
+    if hits(changed(after, orig, 3), FAR):
+        return None, 'paint'                  # what got repainted was not the tile
+    k = lum / rim(after)[0]
+    # the artwork: whatever differs from the tile drawn on its own, which also
+    # catches translucent art the swap recolours along with the tile
+    t0 = render(cut(b, siblings(path, after=True)))
+    t1 = render(cut(nb, siblings(find_tile(nb, parse(nb)), after=True)))
+    region = points(ImageChops.multiply(changed(orig, t0, 24), INSIDE))
+    if len(region) < 0.01 * AREA:
+        return soften_shadows(nb, k), 'lit'
+    c0 = contrast(orig, t0, region)
+
+    def reads(im):
+        c = contrast(im, t1, region)
+        return c >= 0.3 or c >= 0.7 * c0
+    # opaque art the swap left alone. Contrast is an average, so a small white
+    # glyph next to big colourful art (kitty's prompt under the cat) is looked
+    # for on its own: light pixels along the bare tile
+    art = points(ImageChops.multiply(ImageChops.multiply(
+        ImageChops.invert(changed(orig, after, 6)), over(orig.getchannel('A'), 249)), INSIDE))
+    lt, dk, edge = neutral_art(after, art)
+    if reads(after) and edge <= 0.003:
+        return soften_shadows(nb, k), 'lit'
+    if lt > 0.01 and dk > 0.01:
+        # light and dark neutral art together (paper and text, piano keys, a
+        # badge holding a glyph): darkening only the light half merges them
+        return None, 'twotone'
+    picked = glyphs(b, root, orig, t0)
+    if not picked:
+        return None, 'unreadable'
+    # b and nb differ only in attribute values, so their trees line up node for node
+    nb2 = darken(nb, parse(nb), picked)
+    after2 = render(nb2)
+    if after2 is None or not reads(after2) or neutral_art(after2, art)[2] > 0.003:
+        return None, 'unreadable'             # pale colour on white, or a bitmap
+    return soften_shadows(nb2, k), 'lit+glyphs'
+
+# --- run ----------------------------------------------------------------------
+def svgs(d):
+    return [f for f in sorted(os.listdir(d))
+            if f.endswith('.svg') and not os.path.islink(os.path.join(d, f))]
+
+def read(p):
+    with open(p, 'rb') as f:
+        return f.read()
+
+def write(p, b):
+    with open(p, 'wb') as f:
+        f.write(b)
+
+memo = {}
+
+def standardise(b):
+    """-> (bytes, 'light' | 'dark') or (None, None): standard(b), worked out
+    once for a file the two themes share."""
+    key = hashlib.sha1(b).digest()
+    if key not in memo:
+        memo[key] = standard(b)
+    nb, which = memo[key]
+    return (nb, which) if nb is not None else (None, None)
+
+def do_light(name):
+    p = os.path.join(light_dir, name)
+    b = read(p)
+    s, why = reshadow(b)
+    if s is None:
+        # MacTahoe's shadow stays, but the tile can still take the common ramp
+        std, which = standardise(b) if why == 'kept' else (None, None)
+        if std is not None:
+            write(p, std)
+        return b, None, why, which
+    out, how, which = s, 'shadow', None
+    if name in KEEP:
+        how = 'keep'
+    else:
+        lit, how = lighten(s)
+        out = lit if lit is not None else s
+    if out is s:
+        std, which = standardise(s)
+        out = std if std is not None else s
+    cut_at = out.rstrip().rfind(b'</svg>')
+    sp = user_space(parse(out))
+    out = out[:cut_at] + in_space(OUTLINE_EL, sp) + out[cut_at:]
+    if render(out) is None:
+        return b, None, 'kept', None
+    write(p, out)
+    return b, s, how, which
+
+def do_dark(name, cache):
+    p = os.path.join(dark_dir, name)
+    b = read(p)
+    key = hashlib.sha1(b).digest()
+    s, why = cache[key] if key in cache else reshadow(b)
+    if s is not None and render(s) is None:
+        s, why = None, 'kept'
+    std, which = standardise(s if s is not None else b) \
+        if s is not None or why == 'kept' else (None, None)
+    out = std if std is not None else s
+    if out is not None:
+        write(p, out)
+    return 'shadow' if s is not None else why, which
+
+pool = ThreadPoolExecutor(os.cpu_count() or 4)
+cache, light, light_std = {}, {}, {}
+for b, s, how, which in pool.map(do_light, svgs(light_dir)):
+    cache[hashlib.sha1(b).digest()] = (s, how if s is None else None)
+    light[how] = light.get(how, 0) + 1
+    light_std[which] = light_std.get(which, 0) + 1
+dark, dark_std = {}, {}
+for how, which in pool.map(lambda n: do_dark(n, cache), svgs(dark_dir)):
+    dark[how] = dark.get(how, 0) + 1
+    dark_std[which] = dark_std.get(which, 0) + 1
+
+done_l = sum(v for k, v in light.items() if k not in ('shape', 'kept', 'done'))
+print(f'Tile shadow unified on {done_l} light and {dark.get("shadow", 0)} dark app SVGs '
+      f'({light.get("kept", 0)} + {dark.get("kept", 0)} kept MacTahoe\'s, where the '
+      f'swap would have changed the tile or cut off art).')
+print(f'Common tile ramp: {light_std.get("light", 0)} white + {light_std.get("dark", 0)} '
+      f'graphite tiles repainted in the light theme, {dark_std.get("dark", 0)} graphite + '
+      f'{dark_std.get("light", 0)} white in the dark one.')
+lit = light.get('lit', 0) + light.get('lit+glyphs', 0)
+print(f'Light theme: {lit} dark tiles made light ({light.get("lit+glyphs", 0)} with '
+      f'darkened glyphs); kept dark: {light.get("twotone", 0)} two-tone art, '
+      f'{light.get("unreadable", 0)} unreadable on white, {light.get("paint", 0)} '
+      f'unusual tile paint, {light.get("keep", 0)} from keep-dark.conf.')
+PYEOF
+
+# --- 5e. Tahoe corner rim on every dark app SVG -------------------------------
 # A 1px band just inside the squircle, lit from the top-left and bottom-right
 # corners. MacTahoe bakes this into a handful of icons (Finder, Obsidian) and
 # omits it everywhere else; this gives the whole dark theme the same edge.
 # Runs last so it layers over 5b's re-tint and 5c's Finder, and only in the dark
-# theme -- a white rim on the light theme's near-white tile is invisible.
+# theme -- a white rim on the light theme's near-white tile is invisible (5d
+# gives that one step 5's dark outline instead).
 python3 - "$THEME_DARK/apps/scalable" "$DARK_TILE_RIM" <<'PYEOF'
 import os, re, subprocess, sys, tempfile
 from PIL import Image

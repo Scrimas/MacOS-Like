@@ -1,0 +1,10 @@
+# Copy to ~/.config/macos-like/keep-dark.conf (or $XDG_CONFIG_HOME/macos-like/).
+#
+# The light theme turns MacTahoe's dark graphite tiles white. Icons listed here
+# keep their dark tile. One icon name (the app's Icon= value) per line; an
+# alias works too, e.g. "com.visualstudio.code" for visual-studio-code. Text
+# after # is ignored.
+#
+# Example: keep the terminals dark.
+#kitty
+#org.gnome.Terminal

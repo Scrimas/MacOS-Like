@@ -11,8 +11,12 @@ KDE Plasma and for GTK desktops like GNOME:
 
 - **MacOS-Like-Light**: every app you have installed that MacTahoe doesn't cover
   gets its own artwork placed on a Tahoe-style tile, so everything matches.
+  MacTahoe's own dark graphite tiles (Kitty, VS Code, terminals, ...) turn
+  white, and every tile gets the same drop shadow and edge. White and grey
+  tiles all share one shade of white.
 - **MacOS-Like-Dark**: the same, plus dark glass versions of MacTahoe's white
-  tiles and the dark Finder icon from macOS Tahoe.
+  tiles and the dark Finder icon from macOS Tahoe. Its graphite and black
+  tiles all share that same glass.
 
 ## Before and after
 
@@ -23,11 +27,20 @@ MacOS-Like.
 
 ![MacTahoe-dark and MacOS-Like-Dark compared](screenshots/dark.png)
 
-In the light theme, apps MacTahoe already covers (Firefox, Kitty, Spotify, ...)
-stay exactly as they are. Only the ones it doesn't cover (Google, R, scrcpy and
-Claude above) change, so they finally match the rest. The dark theme also
-darkens the white tiles of the apps MacTahoe does cover. The script only makes tiles for the apps on your own system, so your set
-will look different. To render these images from your own themes, run
+In the light theme, the apps MacTahoe doesn't cover (Google, R, Proton Pass and
+Claude above) get tiles that match the rest. The ones it does cover keep their
+artwork, but MacTahoe draws their shadows in many different ways (VS Code and
+Obsidian have none), so every tile now gets the same one. Its graphite tiles
+(Kitty and VS Code above) turn white, with white glyphs made dark so they stay
+readable. An icon keeps its dark tile when that wouldn't work, for example
+when its artwork is white and black together, or too pale for a white tile.
+MacTahoe also paints its white tiles in a dozen slightly different whites and
+greys, and an app's own icon can bring its own white (Proton Pass above), so
+every plain white or grey tile gets the same one; tiles with a tint of their
+own keep it. The dark theme also darkens the white tiles of the apps MacTahoe
+does cover, and gives its graphite and black tiles one shade too.
+The script only makes tiles for the apps on your own system, so your set will
+look different. To render these images from your own themes, run
 `python3 screenshots/render.py` after `./setup.sh` (it needs PyQt6).
 
 ## What you need
@@ -99,6 +112,19 @@ ryujinx=/usr/share/pixmaps/ryujinx.svg
 
 The name on the left is the app's `Icon=` value from its `.desktop` file. On the
 next run that file is put on a tile in place of MacTahoe's icon.
+
+### Keeping an app's dark tile
+
+To keep an app's dark tile in the light theme (a black brand tile, say), copy
+`keep-dark.conf.example` to `~/.config/macos-like/keep-dark.conf` and list the
+app's `Icon=` name, one per line:
+
+```
+kitty
+visual-studio-code
+```
+
+It takes effect the next time you run `./setup.sh`.
 
 ## Folder colors
 
