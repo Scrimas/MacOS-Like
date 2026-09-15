@@ -1,0 +1,10 @@
+# Copy to ~/.config/macos-like/overrides.conf (or $XDG_CONFIG_HOME/macos-like/).
+#
+# One "icon-name=/path/to/source.svg-or-png" per line. The icon name is the
+# app's Icon= value; the file is wrapped onto a macOS tile instead of the icon
+# MacTahoe ships (or the one the normal search would find). Overrides are
+# regenerated on every run. A leading ~/ is expanded; no spaces around "=".
+#
+# Example: keep Ryujinx's own artwork rather than MacTahoe's version.
+#ryujinx=/usr/share/pixmaps/ryujinx.svg
+#org.ryujinx.Ryujinx=/usr/share/pixmaps/ryujinx.svg

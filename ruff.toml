@@ -1,0 +1,16 @@
+# Lint-only config for recolor_folders.py and the Python heredocs inside
+# setup.sh (see lint.sh). `ruff format` is deliberately not used: the
+# code relies on hand-aligned tables and comments.
+line-length = 100
+target-version = "py311"
+
+[lint]
+# Explicit select, not extend-select: ruff >= 0.16's default set is broad and
+# mostly style (%-format, import order) that fights the SVG-templating code.
+select = ["E4", "E7", "E9", "F", "W", "B"]
+ignore = [
+  "E401",  # one-line imports keep the heredocs compact
+  "E731",  # lambda assignment (ATTR helper in step 5d)
+  "E741",  # `l` is lightness in the HLS colour maths
+  "B905",  # zip() strict= — every zip here is over fixed-length RGB triples
+]
