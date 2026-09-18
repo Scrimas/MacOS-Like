@@ -361,6 +361,40 @@ covered() {
   return 1
 }
 
+# Icon= lookup is case-sensitive, so "vesktop" misses MacTahoe's Vesktop.svg and
+# would be wrapped from the generic hicolor art. Map lowercased names to
+# MacTahoe's spelling; such names get an alias to MacTahoe's own design instead.
+declare -A MT_CASE=()
+for ctx in apps/scalable apps/symbolic apps/16 apps/22 apps/32; do
+  for f in "$MACTAHOE/$ctx"/*.svg "$MACTAHOE/$ctx"/*.png; do
+    [ -e "$f" ] || continue
+    f="${f##*/}"; f="${f%.*}"
+    MT_CASE[${f,,}]="$f"
+  done
+done
+
+case_alias() {   # prints MacTahoe's spelling when $1 differs from it only by case
+  local alt="${MT_CASE[${1,,}]:-}"
+  [ -n "$alt" ] && [ "$alt" != "$1" ] && { echo "$alt"; return 0; }
+  return 1
+}
+
+# Point name at MacTahoe's differently-cased file in every apps dir of both
+# themes, and drop any PNG an earlier build generated for it: apps/<size> is
+# Type=Fixed and would outrank the alias.
+link_case_alias() {
+  local name="$1" alt="$2" t d e
+  for t in "$THEME_LIGHT" "$THEME_DARK"; do
+    for d in "$t"/apps/*/ "$t"/apps@2x/*/; do
+      [ -d "$d" ] || continue
+      rm -f "$d$name.png"
+      for e in svg png; do
+        if [ -e "$d$alt.$e" ]; then ln -sfn "$alt.$e" "$d$name.$e"; break; fi
+      done
+    done
+  done
+}
+
 overridden() {
   local n="$1" o
   for o in "${OVERRIDES[@]}"; do [ "${o%%=*}" = "$n" ] && return 0; done
@@ -406,6 +440,11 @@ for n in "${ICONS[@]}"; do
   [[ "$base" == /* ]] && base="$(basename "$base")" && base="${base%.*}"
   overridden "$base" && continue
   covered "$base" && continue
+  if alt=$(case_alias "$base"); then
+    echo "  alias: $base -> $alt"
+    [ "$DRYRUN" -eq 0 ] && link_case_alias "$base" "$alt"
+    continue
+  fi
   if [ "$FORCE" -eq 0 ] \
      && [ -f "$THEME_LIGHT/apps/512/$base.png" ] \
      && [ -f "$THEME_DARK/apps/512/$base.png" ]; then continue; fi

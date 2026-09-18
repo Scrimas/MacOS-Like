@@ -33,7 +33,7 @@ LIGHT_APPS = [
     'firefox',
     'account-google',       # uncovered
     'kitty',                # graphite tile
-    'r',                    # uncovered
+    'R',
     'spotify',
     'proton-pass',          # uncovered
     'visual-studio-code',   # graphite tile
