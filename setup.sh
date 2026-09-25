@@ -347,7 +347,9 @@ mapfile -t ICONS < <(
   for d in "${DATA_DIRS[@]}"; do
     d="$d/applications"
     [ -d "$d" ] || continue
-    grep -Rhs --include='*.desktop' '^Icon=' "$d" | cut -d= -f2-
+    # grep exits 2 on a dangling .desktop link and 1 on a dir without Icon=
+    # lines; under errexit either would end the loop and skip the later dirs.
+    { grep -Rhs --include='*.desktop' '^Icon=' "$d" || true; } | cut -d= -f2-
   done | sed 's/[[:space:]]*$//' | grep -v '^$' | sort -u
 )
 echo "Found ${#ICONS[@]} unique icon names in .desktop files."
