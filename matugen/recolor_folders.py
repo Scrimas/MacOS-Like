@@ -20,12 +20,14 @@ Usage:
     recolor_folders.py                  # recolor from the last tint set
     recolor_folders.py --color '#ffb690'
     recolor_folders.py --setup          # matugen only: install as post-hook + template
+    recolor_folders.py --unsetup        # undo --setup (macos-like uninstall runs it)
     recolor_folders.py --recapture      # also prune baseline entries the theme dropped
     recolor_folders.py --restore        # put the original blue icons back
     recolor_folders.py --preview        # also write a before/after PNG
 """
 import argparse
 import colorsys
+import glob
 import json
 import os
 import re
@@ -67,6 +69,11 @@ MATUGEN_CONFIG = os.path.join(CONFIG_HOME, "matugen/config.toml")
 TEMPLATE_DIR = os.path.join(CONFIG_HOME, "matugen/templates/folder-icons")
 TEMPLATE_FILE = os.path.join(TEMPLATE_DIR, "tint.txt")
 SELF = os.path.join(CONFIG_HOME, "matugen/post-hook-scripts/recolor_folders.py")
+# what --setup writes above its block in config.toml, so --unsetup can find it
+SETUP_COMMENT = (
+    "# Tints the macOS folder icons in MacOS-Like-{Light,Dark} with the current palette.",
+    "# The post-hook reads this template's own output, so the colour is always fresh.",
+)
 
 HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
@@ -148,9 +155,9 @@ def capture(theme, force=False):
     """Refresh the baseline from disk, then return its file list.
 
     A file that still contains ramp colours has not been tinted yet, so it is
-    always safe to (re)capture it. That is what makes this self-healing: step 0
-    of setup.sh rsyncs MacTahoe back over both themes on every build, and
-    the next run simply re-adopts those pristine files as the new baseline —
+    always safe to (re)capture it. That is what makes this self-healing: every
+    setup.sh build starts both themes from MacTahoe's own files again, and the
+    next run simply re-adopts those pristine files as the new baseline —
     picking up any folder artwork MacTahoe has added or changed in the meantime.
 
     The store is never emptied, so an already-tinted theme can never erase it.
@@ -228,10 +235,19 @@ def refresh_caches():
                                capture_output=True)
                 break
     # nudge Plasma into re-reading the icon theme
-    if shutil.which("plasma-changeicons"):
-        current = _current_icon_theme()
-        if current:
-            subprocess.run(["plasma-changeicons", current], capture_output=True)
+    tool = _plasma_changeicons()
+    current = _current_icon_theme()
+    if tool and current:
+        subprocess.run([tool, current], capture_output=True)
+
+
+def _plasma_changeicons():
+    """plasma-workspace keeps it out of PATH on most distributions."""
+    found = shutil.which("plasma-changeicons")
+    candidates = [found] if found else []
+    candidates += ["/usr/lib/plasma-changeicons", "/usr/libexec/plasma-changeicons"]
+    candidates += sorted(glob.glob("/usr/lib/*/libexec/plasma-changeicons"))
+    return next((c for c in candidates if os.access(c, os.X_OK)), None)
 
 
 def _current_icon_theme():
@@ -274,8 +290,7 @@ def setup():
         return
     shutil.copy2(MATUGEN_CONFIG, MATUGEN_CONFIG + ".bak-folder-icons")
     block = (
-        "\n# Tints the macOS folder icons in MacOS-Like-{Light,Dark} with the current palette.\n"
-        "# The post-hook reads this template's own output, so the colour is always fresh.\n"
+        "\n" + "\n".join(SETUP_COMMENT) + "\n"
         "[templates.folder_icons]\n"
         f"input_path = '{TEMPLATE_FILE.replace(HOME, '~')}'\n"
         f"output_path = '{TINT_FILE.replace(HOME, '~')}'\n"
@@ -285,6 +300,39 @@ def setup():
         f.write(block)
     print(f"  registered [templates.folder_icons] in {MATUGEN_CONFIG}")
     print("  the folders take the palette colour from the next matugen run")
+
+
+def unsetup():
+    """Undo --setup: take the [templates.folder_icons] block (its keys and the
+    comment --setup wrote above it) out of config.toml, keeping a backup, and
+    delete the template and the post-hook copy of this script."""
+    try:
+        with open(MATUGEN_CONFIG) as f:
+            lines = f.read().split("\n")
+    except OSError:
+        lines = []
+    if "[templates.folder_icons]" in lines:
+        start = lines.index("[templates.folder_icons]")
+        end = start + 1
+        while end < len(lines) and lines[end].strip() and lines[end].lstrip()[0] not in "#[":
+            end += 1
+        for comment in reversed(SETUP_COMMENT):
+            if start > 0 and lines[start - 1] == comment:
+                start -= 1
+        if start > 0 and not lines[start - 1].strip():
+            start -= 1
+        shutil.copy2(MATUGEN_CONFIG, MATUGEN_CONFIG + ".bak-folder-icons-removed")
+        with open(MATUGEN_CONFIG, "w") as f:
+            f.write("\n".join(lines[:start] + lines[end:]))
+        print(f"  removed [templates.folder_icons] from {MATUGEN_CONFIG}")
+    for path in (TEMPLATE_FILE, SELF):
+        if os.path.exists(path):
+            os.remove(path)
+            print(f"  deleted {path}")
+    try:
+        os.rmdir(TEMPLATE_DIR)
+    except OSError:
+        pass
 
 
 # ── Preview ──────────────────────────────────────────────────────────────────
@@ -322,6 +370,8 @@ def main():
     ap.add_argument("--color", help="tint colour as #rrggbb (saved; the latest tint wins)")
     ap.add_argument("--setup", action="store_true",
                     help="matugen only: install as post-hook and register the template")
+    ap.add_argument("--unsetup", action="store_true",
+                    help="undo --setup: unregister the template, delete the post-hook copy")
     ap.add_argument("--recapture", action="store_true",
                     help="also prune baseline entries whose theme file no longer exists")
     ap.add_argument("--restore", action="store_true",
@@ -336,6 +386,11 @@ def main():
     if args.setup:
         print("[setup] wiring up matugen")
         setup()
+        return
+
+    if args.unsetup:
+        print("[unsetup] unhooking from matugen")
+        unsetup()
         return
 
     if args.restore:

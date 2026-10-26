@@ -1,0 +1,4 @@
+# MacTahoe's copy and the build output aren't this project's code: GitHub
+# leaves them out of the language stats and folds them away in diffs.
+vendor/** linguist-vendored
+prebuilt/** linguist-generated

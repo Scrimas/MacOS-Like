@@ -1,2 +1,4 @@
 __pycache__/
 .ruff_cache/
+# setup.sh --rebuild's work in progress
+.prebuilt.new/

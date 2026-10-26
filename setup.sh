@@ -1,42 +1,61 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# setup.sh — generate the MacOS-Like-Light / MacOS-Like-Dark icon themes.
+# setup.sh — build the MacOS-Like-Light / MacOS-Like-Dark icon themes.
 #
-# Scans all installed .desktop files, finds app icons that MacTahoe does NOT
+# Each theme is MacTahoe, which ships with this script in vendor/ (nothing to
+# install), with the app icons in prebuilt/ laid over it. On top of that, it
+# scans all installed .desktop files, finds app icons that MacTahoe does NOT
 # cover, and composites each app's own artwork onto a macOS Tahoe squircle
 # tile (geometry matched to MacTahoe: margin 4/64, radius 13/64, top-lit
 # gradient, drop shadow).
 #
 # Three source-art classes are handled differently:
-#   1. full-bleed square art  -> becomes the squircle itself (clipped)
+#   1. full-bleed square art  -> becomes the squircle itself (clipped); on a
+#                                coloured tile of its own, that tile becomes
+#                                a Tahoe brand tile -- see BRAND_TILE_*
 #   2. solid disc/blob badge  -> its own background is bled out to the squircle
 #   3. shaped / transparent   -> centered glyph on a Tahoe tile
 #      logo                      (white tile in the light theme, near-black
 #                                glass in dark -- see DARK_TILE_* below)
 #
-# Both themes are self-contained: the whole MacTahoe tree is mirrored into each
-# one (dark overlaid from MacTahoe-dark), so they render without MacTahoe
-# installed and only fall back to a parent theme (breeze-plus, breeze, Papirus
-# or Adwaita, whichever is installed) for what MacTahoe never had.
+# prebuilt/ holds what steps 5b-5e make of MacTahoe's own app icons: one
+# shadow, the common tiles, brand tiles, the dark theme's versions. That work
+# takes ~9 minutes and depends only on vendor/ and this script, never on the
+# machine, so it runs once, with --rebuild, and its result ships with the
+# script; prebuilt/STAMP records what it was made from (--check compares).
 #
-# Input:  MacTahoe (or the --source variant) from ~/.icons, ~/.local/share/icons
-#         or any $XDG_DATA_DIRS/icons -- a user or a system-wide install.
+# Both themes are self-contained and only fall back to a parent theme
+# (breeze-plus, breeze, Papirus or Adwaita, whichever is installed) for what
+# MacTahoe never had. Each is built in a staging directory next to it and
+# swapped in at the end, so a run that fails leaves the old theme untouched.
+#
 # Output: $XDG_DATA_HOME/icons/MacOS-Like-{Light,Dark} (default ~/.local/share/icons)
 #
-# Rerunnable: already-generated icons are skipped. Use --force to regenerate.
+# Rerunnable: app tiles from an earlier run are reused. Use --force to remake them.
 #
-# Usage:  setup.sh [--force] [--dry-run] [--source NAME|DIR]
+# Usage:  setup.sh [--force] [--dry-run] [--rebuild] [--check]
 #                  [--inherits-light LIST] [--inherits-dark LIST]
 
 set -euo pipefail
 
-USAGE="usage: setup.sh [--force] [--dry-run] [--source NAME|DIR]
-                [--inherits-light LIST] [--inherits-dark LIST]"
+USAGE="usage: setup.sh [--force] [--dry-run] [--rebuild] [--check]
+                [--inherits-light LIST] [--inherits-dark LIST]
+
+  --force       remake every app tile instead of reusing the last run's
+  --dry-run     list the app tiles that would be made, change nothing
+  --rebuild     remake prebuilt/ from vendor/ first (maintainers; ~9 minutes)
+  --check       exit 0 if prebuilt/ matches vendor/ and this script, else 1
+  --inherits-light LIST, --inherits-dark LIST
+                fallback themes for icons MacTahoe has no version of at all"
 
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 THEME_LIGHT="$DATA_HOME/icons/MacOS-Like-Light"
 THEME_DARK="$DATA_HOME/icons/MacOS-Like-Dark"
+
+# >>> look
+# Everything from here to "<<< look" decides how a tile looks, so a change in
+# here makes prebuilt/ stale and remakes every app tile (see section() below).
 SIZES=(16 22 24 32 48 64 96 128 256 512)
 
 # Dark-theme tile: near-black "glass" rather than a mid grey, matching Tahoe's
@@ -70,6 +89,18 @@ TILE_SHADOW_BLUR="10"       # Gaussian radius
 TILE_SHADOW_DROP="8"        # downward offset
 TILE_OUTLINE_ALPHA="22"     # 2px black line just inside the edge; 0-255
 
+# Brand tile: an app tile of its own colour -- MacTahoe's coloured tiles
+# (Spotify, Discord, ...) and generated art that brings one (the Craft apps,
+# Beeper, Claude) -- keeps that colour, as a Tahoe ramp: lighter at the top in
+# the light theme, deep in the dark one, with a sheen and Finder's corner glass.
+# Its black and white ink is toned to the brand too. A tile of several hues
+# keeps its own gradient, deepened in the dark theme, under the same sheen.
+# Feeds step 5 (generated PNGs), 5d (MacTahoe's SVGs) and 5e (the glass).
+BRAND_TILE_HL_LIGHT="0.22"  # white sheen opacity at the top edge
+BRAND_TILE_HL_DARK="0.12"
+BRAND_TILE_RIM="0.45"       # corner glass, both themes: Finder's own opacity
+# <<< look
+
 # Apps whose icon should come from a specific file rather than from MacTahoe or
 # from the usual source-art search. The file is run through the same tile wrap as
 # every other app, so the result is a macOS-shaped icon carrying that artwork.
@@ -84,21 +115,86 @@ KEEP_DARK_FILE="$CONFIG_HOME/macos-like/keep-dark.conf"
 
 FORCE=0
 DRYRUN=0
-SOURCE=MacTahoe
+REBUILD=0
+CHECK=0
 INHERITS_LIGHT=""
 INHERITS_DARK=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --force) FORCE=1 ;;
     --dry-run) DRYRUN=1 ;;
-    --source) SOURCE="${2:?--source needs a theme name or directory}"; shift ;;
+    --rebuild) REBUILD=1 ;;
+    --check) CHECK=1 ;;
     --inherits-light) INHERITS_LIGHT="${2:?--inherits-light needs a list}"; shift ;;
     --inherits-dark) INHERITS_DARK="${2:?--inherits-dark needs a list}"; shift ;;
+    --source)
+      echo "--source is gone: MacTahoe now comes with MacOS-Like (vendor/). Its colour" \
+           "variants only recolour the folders; for that, run 'macos-like folders nord'" \
+           "(or any of MacTahoe's colours, or a '#rrggbb'), or" \
+           "matugen/recolor_folders.py --color '#rrggbb'." >&2
+      exit 2 ;;
     -h|--help) echo "$USAGE"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; echo "$USAGE" >&2; exit 2 ;;
   esac
   shift
 done
+if [ "$DRYRUN" -eq 1 ] && [ "$REBUILD" -eq 1 ]; then
+  echo "--dry-run writes nothing, so it can't --rebuild" >&2; exit 2
+fi
+
+# --- MacTahoe and prebuilt/ ---------------------------------------------------
+# vendor/ is MacTahoe at the commit tools/update-mactahoe.sh pins, exactly as
+# its installer lays it out; prebuilt/ is steps 5b-5e's output for it.
+SCRIPT="$(readlink -f "$0")"
+REPO_DIR="$(dirname "$SCRIPT")"
+VENDOR="$REPO_DIR/vendor"
+MACTAHOE="$VENDOR/MacTahoe"
+MACTAHOE_DARK="$VENDOR/MacTahoe-dark"
+PREBUILT="$REPO_DIR/prebuilt"
+if [ ! -f "$VENDOR/VERSION" ] || [ ! -f "$MACTAHOE/index.theme" ] \
+   || [ ! -d "$MACTAHOE/apps/scalable" ] || [ ! -f "$MACTAHOE_DARK/index.theme" ]; then
+  echo "vendor/ is incomplete: $VENDOR should hold MacTahoe and MacTahoe-dark." >&2
+  echo "Download MacOS-Like again, or run tools/update-mactahoe.sh." >&2
+  exit 1
+fi
+read -r MACTAHOE_COMMIT < "$VENDOR/VERSION"
+
+# A short hash of the lines between "# >>> NAME" and "# <<< NAME" in this
+# script, comments and blank lines aside: "look" holds the tile constants,
+# "prebuilt" steps 5b-5e and "tiles" step 5. prebuilt/ is stale when MacTahoe or
+# look/prebuilt changed since it was made; the app tiles of an earlier run are
+# remade when look/tiles changed.
+section() {
+  sed -n "/^# >>> $1\$/,/^# <<< $1\$/p" "$SCRIPT" \
+    | grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' || true
+}
+for s in look prebuilt tiles; do
+  [ -n "$(section "$s")" ] || { echo "setup.sh: no '# >>> $s' section" >&2; exit 2; }
+done
+PREBUILT_ID=$({ echo "$MACTAHOE_COMMIT"; section look; section prebuilt; } \
+                | sha256sum | cut -c1-16)
+TILES_ID=$({ section look; section tiles; } | sha256sum | cut -c1-16)
+STAMP="$PREBUILT/STAMP"
+stamp_id() { [ -f "$STAMP" ] && sed -n 's/^inputs=//p' "$STAMP" || true; }
+
+if [ "$CHECK" -eq 1 ]; then
+  if [ "$(stamp_id)" = "$PREBUILT_ID" ]; then
+    echo "prebuilt/ is up to date ($PREBUILT_ID)."; exit 0
+  fi
+  echo "prebuilt/ is stale: it was made from '$(stamp_id)', but vendor/ and setup.sh" \
+       "now give $PREBUILT_ID. Run ./setup.sh --rebuild." >&2
+  exit 1
+fi
+if [ "$REBUILD" -eq 0 ]; then
+  if [ ! -d "$PREBUILT/Light/apps" ] || [ ! -d "$PREBUILT/Dark/apps" ]; then
+    echo "prebuilt/ is missing: run ./setup.sh --rebuild (about 9 minutes)." >&2
+    exit 1
+  fi
+  if [ "$(stamp_id)" != "$PREBUILT_ID" ]; then
+    echo "warning: prebuilt/ was made by another version of setup.sh or MacTahoe;" \
+         "./setup.sh --rebuild remakes it (about 9 minutes)." >&2
+  fi
+fi
 
 # --- Dependencies -------------------------------------------------------------
 # Checked up front: a tool that turns out to be missing mid-run would stop the
@@ -109,7 +205,6 @@ python3 -c 'import PIL' 2>/dev/null \
   || missing+=("Pillow        (Arch: python-pillow  Debian/Ubuntu: python3-pil   Fedora: python3-pillow)")
 command -v rsvg-convert >/dev/null 2>&1 \
   || missing+=("rsvg-convert  (Arch: librsvg        Debian/Ubuntu: librsvg2-bin  Fedora: librsvg2-tools)")
-command -v rsync >/dev/null 2>&1 || missing+=("rsync")
 if [ "${#missing[@]}" -gt 0 ]; then
   printf 'missing dependency: %s\n' "${missing[@]}" >&2
   [ "$DRYRUN" -eq 1 ] || exit 1
@@ -117,8 +212,8 @@ fi
 
 # --- Search paths -------------------------------------------------------------
 # XDG data dirs in spec order, plus the usual system and Flatpak roots even when
-# $XDG_DATA_DIRS leaves them out. They are searched for the MacTahoe source, the
-# parent theme, .desktop files and source artwork alike.
+# $XDG_DATA_DIRS leaves them out. They are searched for the parent theme,
+# .desktop files and source artwork alike.
 IFS=: read -ra xdg_dirs <<< "${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 DATA_DIRS=()
 declare -A seen=()
@@ -140,80 +235,7 @@ theme_dir() {
   return 1
 }
 
-# --- Source theme -------------------------------------------------------------
-# A name is looked up like any icon theme (user install first); anything with a
-# slash is taken as the theme directory itself.
-MACTAHOE_URL="https://github.com/vinceliuice/MacTahoe-icon-theme"
-
-resolve_source() {
-  MACTAHOE=""
-  if [[ "$SOURCE" == */* ]]; then
-    MACTAHOE="${SOURCE%/}"
-  else
-    MACTAHOE="$(theme_dir "$SOURCE")" || MACTAHOE=""
-  fi
-  [ -n "$MACTAHOE" ] && [ -f "$MACTAHOE/index.theme" ] && [ -d "$MACTAHOE/apps/scalable" ]
-}
-
-# Download upstream MacTahoe and run its own installer into the user's icon dir
-# (no root needed); $1 is its colour variant (default, nord, ...). A subshell,
-# so the temp dir goes with it; every step is checked because the caller's `||`
-# switches set -e off in here.
-install_mactahoe() (
-  url="$MACTAHOE_URL/archive/refs/heads/main.tar.gz"
-  if command -v curl >/dev/null 2>&1; then fetch=(curl -fsSL "$url")
-  elif command -v wget >/dev/null 2>&1; then fetch=(wget -qO- "$url")
-  else echo "Installing MacTahoe needs curl or wget." >&2; exit 1
-  fi
-  tmp=$(mktemp -d) || exit 1
-  trap 'rm -rf "$tmp"' EXIT
-  echo "Downloading $url ..."
-  "${fetch[@]}" | tar -xz -C "$tmp" --strip-components=1 || exit 1
-  # As the AUR package does: install.sh ends every theme with a bare
-  # gtk-update-icon-cache that aborts the install where that tool is missing.
-  # Step 6 rebuilds the caches this script actually uses.
-  sed -i '/gtk-update-icon-cache/d' "$tmp/install.sh" || exit 1
-  mkdir -p "$DATA_HOME/icons" || exit 1
-  bash "$tmp/install.sh" -d "$DATA_HOME/icons" -t "$1"
-)
-
-if ! resolve_source; then
-  # Only the stock names can be installed: MacTahoe or MacTahoe-<colour>.
-  variant=""
-  case "$SOURCE" in
-    MacTahoe) variant=default ;;
-    MacTahoe-blue|MacTahoe-purple|MacTahoe-green|MacTahoe-red|MacTahoe-orange\
-    |MacTahoe-yellow|MacTahoe-grey|MacTahoe-nord) variant="${SOURCE#MacTahoe-}" ;;
-  esac
-  if [ -n "$variant" ] && [ "$DRYRUN" -eq 0 ] && [ -t 0 ]; then
-    read -r -p "$SOURCE icon theme is not installed. Download it from $MACTAHOE_URL
-and install it to $DATA_HOME/icons? [Y/n] " answer || answer=n
-    case "$answer" in
-      ""|[Yy]|[Yy][Ee][Ss])
-        install_mactahoe "$variant" || { echo "MacTahoe install failed." >&2; exit 1; }
-        resolve_source || true ;;
-    esac
-  fi
-fi
-if ! resolve_source; then
-  echo "MacTahoe icon theme '$SOURCE' not found. Searched: ${ICON_BASES[*]}" >&2
-  echo "Install it ($MACTAHOE_URL, or the AUR package mactahoe-icon-theme-git)," \
-       "or pass --source NAME|DIR." >&2
-  if [ -n "${variant:-}" ] && { [ "$DRYRUN" -eq 1 ] || [ ! -t 0 ]; }; then
-    echo "Run from a terminal without --dry-run to be offered the install." >&2
-  fi
-  exit 1
-fi
-case "$MACTAHOE" in
-  "$THEME_LIGHT"|"$THEME_DARK")
-    echo "--source must be a MacTahoe theme, not this script's output" >&2; exit 2 ;;
-esac
-# The dark variant only works from the same directory: its apps/scalable is a
-# relative symlink into the light theme.
-MACTAHOE_DARK="$MACTAHOE-dark"
-[ -d "$MACTAHOE_DARK" ] \
-  || echo "warning: $MACTAHOE_DARK not found; the dark theme starts from light artwork" >&2
-echo "Source: $MACTAHOE"
+echo "Base: MacTahoe ${MACTAHOE_COMMIT:0:7} (vendor/)"
 
 # --- Parent themes ------------------------------------------------------------
 # What MacTahoe lacks (plenty of actions/, status/ and mimetypes/ names) comes
@@ -234,9 +256,8 @@ echo "Inherits: $INHERITS_LIGHT (light), $INHERITS_DARK (dark)"
 # --- Folder tint (optional) ---------------------------------------------------
 # matugen in use but the folder hook not wired up yet: offer it. --setup copies
 # recolor_folders.py into matugen's post-hook-scripts and registers the template,
-# so the folders follow the wallpaper palette. Asked up front, like the MacTahoe
-# install, so the build itself runs unattended; a "no" is remembered.
-REPO_DIR="$(dirname "$(readlink -f "$0")")"
+# so the folders follow the wallpaper palette. Asked up front, so the build
+# itself runs unattended; a "no" is remembered.
 MATUGEN_CONFIG="$CONFIG_HOME/matugen/config.toml"
 MATUGEN_HOOK="$CONFIG_HOME/matugen/post-hook-scripts/recolor_folders.py"
 NO_TINT_PROMPT="$CONFIG_HOME/macos-like/no-matugen-prompt"
@@ -276,8 +297,7 @@ fi
 # --- index.theme --------------------------------------------------------------
 # Derived from MacTahoe's, so every context directory it ships is declared here
 # too; only the identity, the inherit chain and the extra apps/<size> dirs
-# holding the generated PNGs differ. Written right after the mirror, before any
-# generation step: if one of those fails, the theme is still complete and usable.
+# holding the generated PNGs differ.
 write_index() {
   python3 - "$MACTAHOE/index.theme" "$1/index.theme" "$2" "$3" "${SIZES[*]}" <<'PYEOF'
 import sys
@@ -308,39 +328,9 @@ open(dst, 'w', encoding='utf-8').write('\n'.join(out).rstrip('\n') + '\n')
 PYEOF
 }
 
-# --- 0. Mirror the MacTahoe tree into both themes -----------------------------
-# Real copies, so each theme is a complete theme on its own. rsync keeps the
-# thousands of alias symlinks that point *inside* the tree as symlinks, and
-# --copy-unsafe-links dereferences the ones that escape it (MacTahoe-dark's
-# apps/scalable -> ../../MacTahoe/apps/scalable, its animations/emotes/
-# preferences top-level links) so nothing in the output points back at MacTahoe.
-# index.theme is written by write_index; a copied icon-theme.cache would be stale.
-mirror() {
-  rsync -a --copy-unsafe-links \
-        --exclude='index.theme' --exclude='icon-theme.cache' "$1/" "$2/"
-}
-if [ "$DRYRUN" -eq 0 ]; then
-  # The light theme used to be plain "MacOS-Like": carry an existing build over
-  # so its generated icons are kept instead of rebuilt next to a stale copy.
-  OLD_LIGHT="$DATA_HOME/icons/MacOS-Like"
-  if [ -d "$OLD_LIGHT" ] && [ ! -e "$THEME_LIGHT" ] \
-     && grep -qx 'Name=MacOS-Like' "$OLD_LIGHT/index.theme" 2>/dev/null; then
-    mv "$OLD_LIGHT" "$THEME_LIGHT"
-    rm -f "$THEME_LIGHT/icon-theme.cache"
-    echo "Renamed $OLD_LIGHT -> $THEME_LIGHT"
-  fi
-  echo "Mirroring MacTahoe into both themes..."
-  # rsync creates only the last path component; ~/.local/share/icons need not
-  # exist yet when MacTahoe is installed system-wide.
-  mkdir -p "$THEME_LIGHT" "$THEME_DARK"
-  mirror "$MACTAHOE" "$THEME_LIGHT"
-  mirror "$MACTAHOE" "$THEME_DARK"
-  # MacTahoe-dark only ships the contexts it actually restyles; the rest of the
-  # dark theme is the MacTahoe copy laid down above.
-  if [ -d "$MACTAHOE_DARK" ]; then mirror "$MACTAHOE_DARK" "$THEME_DARK"; fi
-  write_index "$THEME_LIGHT" "MacOS-Like-Light" "$INHERITS_LIGHT"
-  write_index "$THEME_DARK" "MacOS-Like-Dark" "$INHERITS_DARK"
-fi
+# The run itself (step 0, assembling both themes from vendor/ and prebuilt/,
+# and the order of every step) is at the end of this file, under "--- run".
+# Everything up to there only defines functions and gathers what they need.
 
 # --- 1. Collect Icon= names from every .desktop file --------------------------
 mapfile -t ICONS < <(
@@ -382,11 +372,11 @@ case_alias() {   # prints MacTahoe's spelling when $1 differs from it only by ca
 }
 
 # Point name at MacTahoe's differently-cased file in every apps dir of both
-# themes, and drop any PNG an earlier build generated for it: apps/<size> is
-# Type=Fixed and would outrank the alias.
+# themes, and drop any PNG generated for it: apps/<size> is Type=Fixed and
+# would outrank the alias.
 link_case_alias() {
   local name="$1" alt="$2" t d e
-  for t in "$THEME_LIGHT" "$THEME_DARK"; do
+  for t in "$OUT_LIGHT" "$OUT_DARK"; do
     for d in "$t"/apps/*/ "$t"/apps@2x/*/; do
       [ -d "$d" ] || continue
       rm -f "$d$name.png"
@@ -430,61 +420,96 @@ resolve_src() {
 }
 
 # --- 4. Build work list -------------------------------------------------------
-if [ "$DRYRUN" -eq 0 ]; then
-  for t in "$THEME_LIGHT" "$THEME_DARK"; do
-    for s in "${SIZES[@]}"; do mkdir -p "$t/apps/$s"; done
-  done
-fi
+# For the themes being built, $OUT_LIGHT and $OUT_DARK: the staging copies, or
+# on --dry-run the installed themes, which it only reads. An app's tiles from
+# the last run are copied over rather than made again, unless --force says so
+# or the tile code or look changed since (TILES_ID, kept in each theme's
+# .macos-like file).
+BUILD_INFO=.macos-like
 
-WORK=()   # entries: "name<TAB>srcpath"
-for n in "${ICONS[@]}"; do
-  base="$n"
-  [[ "$base" == /* ]] && base="$(basename "$base")" && base="${base%.*}"
-  overridden "$base" && continue
-  covered "$base" && continue
-  if alt=$(case_alias "$base"); then
-    echo "  alias: $base -> $alt"
-    [ "$DRYRUN" -eq 0 ] && link_case_alias "$base" "$alt"
-    continue
+built_tiles() { sed -n 's/^tiles=//p' "$1/$BUILD_INFO" 2>/dev/null || true; }
+
+has_tiles() {   # every size of $1's tile in both installed themes
+  local s
+  for s in "${SIZES[@]}"; do
+    [ -f "$THEME_LIGHT/apps/$s/$1.png" ] && [ -f "$THEME_DARK/apps/$s/$1.png" ] || return 1
+  done
+}
+
+reuse_tiles() {
+  local s
+  for s in "${SIZES[@]}"; do
+    cp -p "$THEME_LIGHT/apps/$s/$1.png" "$OUT_LIGHT/apps/$s/"
+    cp -p "$THEME_DARK/apps/$s/$1.png" "$OUT_DARK/apps/$s/"
+  done
+}
+
+plan_work() {
+  local n base alt src o name t d s reuse=0
+  if [ "$FORCE" -eq 0 ] && [ "$(built_tiles "$THEME_LIGHT")" = "$TILES_ID" ] \
+     && [ "$(built_tiles "$THEME_DARK")" = "$TILES_ID" ]; then
+    reuse=1
   fi
-  if [ "$FORCE" -eq 0 ] \
-     && [ -f "$THEME_LIGHT/apps/512/$base.png" ] \
-     && [ -f "$THEME_DARK/apps/512/$base.png" ]; then continue; fi
-  if src=$(resolve_src "$n"); then
-    WORK+=("$base"$'\t'"$src")
-  else
-    echo "  skip (no source art): $n"
-  fi
-done
-# Overrides are wrapped like everything else, and unconditionally: they bypass
-# covered()/FORCE so a rerun always re-derives them from the pinned source. The
-# mirrored MacTahoe files must go first, or its apps/16|22|32 SVGs (Type=Fixed)
-# and apps/scalable copy would outrank the PNGs generated below.
-for o in "${OVERRIDES[@]}"; do
-  name="${o%%=*}"; src="${o#*=}"
-  [ -f "$src" ] || { echo "  override source missing: $src" >&2; continue; }
   if [ "$DRYRUN" -eq 0 ]; then
-    for t in "$THEME_LIGHT" "$THEME_DARK"; do
-      for d in "$t"/apps/*/; do rm -f "$d$name.svg" "$d$name.png"; done
+    for t in "$OUT_LIGHT" "$OUT_DARK"; do
+      for s in "${SIZES[@]}"; do mkdir -p "$t/apps/$s"; done
     done
   fi
-  WORK+=("$name"$'\t'"$src")
-done
 
-echo "To generate: ${#WORK[@]} icons (x2 variants)."
-[ "$DRYRUN" -eq 1 ] && { printf '%s\n' "${WORK[@]}"; exit 0; }
+  WORK=()   # entries: "name<TAB>srcpath"
+  REUSED=0
+  for n in "${ICONS[@]}"; do
+    base="$n"
+    [[ "$base" == /* ]] && base="$(basename "$base")" && base="${base%.*}"
+    overridden "$base" && continue
+    covered "$base" && continue
+    if alt=$(case_alias "$base"); then
+      echo "  alias: $base -> $alt"
+      [ "$DRYRUN" -eq 0 ] && link_case_alias "$base" "$alt"
+      continue
+    fi
+    if [ "$reuse" -eq 1 ] && has_tiles "$base"; then
+      [ "$DRYRUN" -eq 1 ] || reuse_tiles "$base"
+      REUSED=$((REUSED + 1))
+      continue
+    fi
+    if src=$(resolve_src "$n"); then
+      WORK+=("$base"$'\t'"$src")
+    else
+      echo "  skip (no source art): $n"
+    fi
+  done
+  # Overrides are wrapped like everything else, and unconditionally: they bypass
+  # covered() and the reuse above, so a rerun always re-derives them from the
+  # pinned source. MacTahoe's own files must go first, or its apps/16|22|32 SVGs
+  # (Type=Fixed) and apps/scalable copy would outrank the PNGs generated below.
+  for o in "${OVERRIDES[@]}"; do
+    name="${o%%=*}"; src="${o#*=}"
+    [ -f "$src" ] || { echo "  override source missing: $src" >&2; continue; }
+    if [ "$DRYRUN" -eq 0 ]; then
+      for t in "$OUT_LIGHT" "$OUT_DARK"; do
+        for d in "$t"/apps/*/; do rm -f "$d$name.svg" "$d$name.png"; done
+      done
+    fi
+    WORK+=("$name"$'\t'"$src")
+  done
+  echo "App tiles: ${#WORK[@]} to make, $REUSED reused from the last run."
+}
 
+# >>> tiles
 # --- 5. Composite with Pillow -------------------------------------------------
-if [ "${#WORK[@]}" -gt 0 ]; then
+step_5() {
+  [ "${#WORK[@]}" -gt 0 ] || return 0
   WORKLIST=$(mktemp)
-  trap 'rm -f "$WORKLIST"' EXIT
   printf '%s\n' "${WORK[@]}" > "$WORKLIST"
-  python3 - "$THEME_LIGHT" "$THEME_DARK" "$WORKLIST" \
+  python3 - "$OUT_LIGHT" "$OUT_DARK" "$WORKLIST" \
            "$DARK_TILE_TOP" "$DARK_TILE_BOT" "$DARK_TILE_HL" "$DARK_TILE_HL_SPAN" \
            "$DARK_TILE_RIM" "$LIGHT_TILE_TOP" "$LIGHT_TILE_BOT" \
            "$TILE_SHADOW_ALPHA" "$TILE_SHADOW_BLUR" "$TILE_SHADOW_DROP" \
-           "$TILE_OUTLINE_ALPHA" "$KEEP_DARK_FILE" <<'PYEOF'
-import sys, os, math, statistics, subprocess, tempfile
+           "$TILE_OUTLINE_ALPHA" "$KEEP_DARK_FILE" \
+           "$BRAND_TILE_HL_LIGHT" "$BRAND_TILE_HL_DARK" "$BRAND_TILE_RIM" <<'PYEOF'
+import sys, os, math, random, statistics, subprocess, tempfile, colorsys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image, ImageDraw, ImageFilter, ImageChops
 
 light_dir, dark_dir, worklist = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -518,6 +543,8 @@ def keep_dark(path):
         return set()
 
 KEEP_DARK = keep_dark(sys.argv[15])
+BRAND_HL = {'light': float(sys.argv[16]), 'dark': float(sys.argv[17])}
+BRAND_RIM = float(sys.argv[18])
 
 SIZES = [16, 22, 24, 32, 48, 64, 96, 128, 256, 512]
 C = 512                               # canvas
@@ -859,8 +886,9 @@ def lightify(layer, back_l):
 
 # --- artwork on its own neutral tile -> the standard tile ---------------------
 def terms(x, y):
+    """quadratic terms first, then the cubic ones: a fit keeps len(coeffs)."""
     u, v = (x - C / 2) / (C / 2), (y - C / 2) / (C / 2)
-    return (1.0, u, v, u * u, v * v, u * v)
+    return (1.0, u, v, u * u, v * v, u * v, u * u * u, v * v * v, u * u * v, u * v * v)
 
 def solve(a, b):
     """Gauss-Jordan with partial pivoting: x with a x = b."""
@@ -875,23 +903,23 @@ def solve(a, b):
                 m[r] = [u - k * w for u, w in zip(m[r], m[c])]
     return [m[i][n] / m[i][i] for i in range(n)]
 
-def surface(pts):
-    """least-squares quadratic surface in x and y through (x, y, rgb) points,
-    per channel: a gradient in any direction, and one that darkens faster
-    towards an edge (Proton Authenticator's)."""
-    a = [[0.0] * 6 for _ in range(6)]
-    b = [[0.0] * 6 for _ in range(3)]
+def surface(pts, n=6):
+    """least-squares quadratic (n=6) or cubic (n=10) surface in x and y through
+    (x, y, rgb) points, per channel: a gradient in any direction, and one that
+    darkens faster towards an edge (Proton Authenticator's)."""
+    a = [[0.0] * n for _ in range(n)]
+    b = [[0.0] * n for _ in range(3)]
     for x, y, c in pts:
         t = terms(x, y)
-        for i in range(6):
-            for j in range(6):
+        for i in range(n):
+            for j in range(n):
                 a[i][j] += t[i] * t[j]
             for k in range(3):
                 b[k][i] += t[i] * c[k]
     return [solve(a, b[k]) for k in range(3)]
 
 def at(fit, x, y):
-    t = terms(x, y)
+    t = terms(x, y)       # zip stops at the fit's own number of terms
     return tuple(min(255.0, max(0.0, sum(u * w for u, w in zip(f, t)))) for f in fit)
 
 def backdrop(layer):
@@ -951,6 +979,408 @@ def tone(lum):
     """which standard tile a neutral backdrop of this luma belongs on, if any."""
     return 'light' if lum > 0.8 else 'dark' if lum < 0.45 else None
 
+# --- artwork on a brand-colour tile of its own -> Tahoe brand tile ------------
+# The Craft apps, Beeper, Claude: a flat or graded saturated tile with art on
+# it. The tile is fitted as a smooth surface, every pixel is read as bare tile,
+# tile under a translucent shadow or glow (Breeze long shadows, Kasts' rings),
+# or art, and the tile is repainted as a Tahoe ramp of its own colour. Each test
+# below has a wide margin on the icons it was tuned on; an icon that fails one
+# keeps the plain full-bleed treatment, never a half-repainted tile.
+TOL = 10      # levels a pixel may sit from the fitted tile and still be tile
+NSEC = 72     # angular sectors of the edge band
+
+def off(c, f):
+    return max(abs(a - b) for a, b in zip(c, f))
+
+def classify(c, B):
+    """('tile', None), ('shade', k) for B * k, ('glow', k) for B lifted k of
+    the way to white, or ('art', None)."""
+    if off(c, B) <= TOL:
+        return 'tile', None
+    n = sum(b * b for b in B)
+    if n:
+        k = sum(a * b for a, b in zip(c, B)) / n
+        if 0.3 <= k < 1.0 and max(abs(a - k * b) for a, b in zip(c, B)) <= TOL:
+            return 'shade', k
+    w = [255 - b for b in B]
+    n = sum(v * v for v in w)
+    if n:
+        k = sum((a - b) * v for a, b, v in zip(c, B, w)) / n
+        if 0.0 < k <= 0.7 and max(abs(a - (b + k * v)) for a, b, v in zip(c, B, w)) <= TOL:
+            return 'glow', k
+    return 'art', None
+
+def band_samples(layer):
+    px, rp = layer.load(), RIM_BAND_MASK.load()
+    return [(x, y, px[x, y][:3])
+            for y in range(MARGIN, MARGIN + TILE, 2) for x in range(MARGIN, MARGIN + TILE, 2)
+            if rp[x, y] >= 200 and px[x, y][3] >= 250]
+
+def band_fit(samples):
+    """The tile as a quadratic surface, from the edge band: the median of each
+    sector that is mostly one colour, then RANSAC over those medians (seeded,
+    so every run picks the same tile), refined on the band samples it explains.
+    A plain least-squares fit is pulled off by art crossing the edge (the Craft
+    animals cover a fifth of it), and one seeded from the commonest colour only
+    ever learns a stripe of a gradient tile (Kasts)."""
+    sec = [[] for _ in range(NSEC)]
+    for s in samples:
+        a = math.atan2(s[1] - C / 2, s[0] - C / 2)
+        sec[int((a + math.pi) / (2 * math.pi) * NSEC) % NSEC].append(s)
+    meds = []
+    for ss in sec:
+        if len(ss) < 8:
+            continue
+        m = tuple(statistics.median(s[2][i] for s in ss) for i in range(3))
+        if sum(off(s[2], m) <= 12 for s in ss) >= 0.6 * len(ss):
+            meds.append((statistics.fmean(s[0] for s in ss),
+                         statistics.fmean(s[1] for s in ss), m))
+    if len(meds) < 12:
+        return None
+    rnd = random.Random(0)
+    best, most = None, -1
+    for _ in range(300):
+        try:
+            fit = surface(rnd.sample(meds, 8))
+        except ZeroDivisionError:
+            continue
+        n = sum(off(m[2], at(fit, m[0], m[1])) <= TOL for m in meds)
+        if n > most:
+            best, most = fit, n
+    if best is None:
+        return None
+    keep = [m for m in meds if off(m[2], at(best, m[0], m[1])) <= TOL]
+    for _ in range(3):
+        if len(keep) < 12:
+            return None
+        try:
+            fit = surface(keep)
+        except ZeroDivisionError:
+            return None
+        keep = [s for s in samples if off(s[2], at(fit, s[0], s[1])) <= 12]
+    return fit
+
+def grow_fit(layer, fit):
+    """Refit on every pixel of the squircle that reads as bare tile, cubic once
+    the samples span it: a fit taken from the band alone drifts more than TOL
+    inside the tile (Francis, Kasts), and those pixels would keep their old
+    colour as patches."""
+    px, mp = layer.load(), MASK.load()
+    pts = [(x, y, px[x, y][:3]) for y in range(MARGIN, MARGIN + TILE, 3)
+           for x in range(MARGIN, MARGIN + TILE, 3) if mp[x, y] == 255 and px[x, y][3] >= 250]
+    for _ in range(4):
+        keep = [p for p in pts if off(p[2], at(fit, p[0], p[1])) <= TOL]
+        if len(keep) < 60:
+            break
+        try:
+            fit = surface(keep, 10 if len(keep) >= 400 else 6)
+        except ZeroDivisionError:
+            break
+    return fit
+
+def classes(layer, fit):
+    """classify() for every pixel of the squircle. Specks of art, shade or glow
+    are tile grain (Claude's), not design: under 8 px, or under 64 px and never
+    more than 32 levels off the tile. Left alone they keep the old tile colour,
+    or darken and lift the new one, and speckle it."""
+    src, mp = layer.load(), MASK.load()
+    kind = {}
+    for y in range(MARGIN, MARGIN + TILE):
+        for x in range(MARGIN, MARGIN + TILE):
+            if mp[x, y]:
+                kind[x, y] = classify(src[x, y][:3], at(fit, x, y))
+    seen = set()
+    for p, (k, _) in kind.items():
+        if k == 'tile' or p in seen:
+            continue
+        blob, todo = [p], [p]
+        seen.add(p)
+        while todo:
+            x, y = todo.pop()
+            for q in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                if q not in seen and kind.get(q, ('',))[0] == k:
+                    seen.add(q)
+                    blob.append(q)
+                    todo.append(q)
+        if len(blob) < 8 or (len(blob) < 64 and max(
+                off(src[q][:3], at(fit, *q)) for q in blob) <= 32):
+            for q in blob:
+                kind[q] = ('tile', None)
+    return kind
+
+def two_tone(layer, fit, samples):
+    """A second smooth saturated surface over a quarter of the tile or more: a
+    split design (Kontrast), not art on a tile."""
+    rest = [s for s in samples if classify(s[2], at(fit, s[0], s[1]))[0] == 'art']
+    if len(rest) < 30:
+        return False
+    bins = {}
+    for s in rest:
+        bins.setdefault(tuple(v // 12 for v in s[2]), []).append(s)
+    keep = max(bins.values(), key=len)
+    for _ in range(3):
+        if len(keep) < 12:
+            return False
+        try:
+            f2 = surface(keep)
+        except ZeroDivisionError:
+            return False
+        keep = [s for s in rest if off(s[2], at(f2, s[0], s[1])) <= TOL]
+    px, mp = layer.load(), MASK.load()
+    n = m = 0
+    for y in range(MARGIN, MARGIN + TILE, 4):
+        for x in range(MARGIN, MARGIN + TILE, 4):
+            if mp[x, y] == 255:
+                n += 1
+                m += off(px[x, y][:3], at(f2, x, y)) <= TOL
+    c = at(f2, C / 2, C / 2)
+    return m >= 0.25 * n and max(c) - min(c) >= 0.12 * 255
+
+def stray_tile(layer, fit, kind):
+    """share of the squircle read as art yet within 48 levels of the tile: tile
+    the fit failed to explain (0.01 at most on the icons this was tuned on,
+    0.05 and up on Breeze long shadows that are not a plain darkening)."""
+    px = layer.load()
+    n = m = 0
+    for (x, y), (k, _) in kind.items():
+        if px[x, y][3] < 250:
+            continue
+        n += 1
+        m += k == 'art' and off(px[x, y][:3], at(fit, x, y)) <= 48
+    return m / max(n, 1)
+
+def neutral(c):
+    """1 for black, white and greys up to a chroma of 0.10, 0 from 0.22."""
+    return 1.0 - min(max(((max(c) - min(c)) / 255 - 0.10) / 0.12, 0.0), 1.0)
+
+def ink_and_paper(layer, kind):
+    """The neutral art is ink and paper (engravings, white logos), not grey
+    material: under half of it is mid grey. A chalkboard (Cantor) or a grey
+    elephant (Tokodon) is near all mid grey, and keeps its colour."""
+    px = layer.load()
+    n = mid = 0
+    for (x, y), (k, _) in kind.items():
+        c = px[x, y][:3]
+        if k == 'art' and px[x, y][3] >= 250 and neutral(c) >= 1.0:
+            n += 1
+            mid += 0.18 <= luma(c) <= 0.70
+    return mid < 0.5 * n if n else True
+
+def many_hued(fit):
+    """the fitted tile spans several hues (a teal -> green ramp, Instagram's):
+    a design of its own, not one brand colour."""
+    hs = []
+    for y in range(MARGIN, MARGIN + TILE, 16):
+        for x in range(MARGIN, MARGIN + TILE, 16):
+            c = at(fit, x, y)
+            if MASK.getpixel((x, y)) == 255 and max(c) - min(c) >= 24:
+                hs.append(colorsys.rgb_to_hsv(*(v / 255 for v in c))[0])
+    if not hs:
+        return False
+    sx = sum(math.cos(2 * math.pi * h) for h in hs) / len(hs)
+    sy = sum(math.sin(2 * math.pi * h) for h in hs) / len(hs)
+    r = min(max(math.hypot(sx, sy), 1e-9), 1.0)
+    return math.sqrt(max(0.0, -2 * math.log(r))) > 0.25   # circular std, radians
+
+def brand_tile(layer, name):
+    """(fit, kind, brand colour, tint, many-hued) for art on a coloured tile of
+    its own, else None."""
+    samples = band_samples(layer)
+    if len(samples) < 100:
+        return None
+    fit = band_fit(samples)
+    if fit is None:
+        return None
+    c = at(fit, C / 2, C / 2)
+    if max(c) - min(c) < 16:
+        return None           # neutral: backdrop()'s business
+    if sum(classify(s[2], at(fit, s[0], s[1]))[0] != 'art'
+           for s in samples) < 0.70 * len(samples):
+        return None           # not a tile along the edge: cover art, scenes
+    fit = grow_fit(layer, fit)
+    if two_tone(layer, fit, samples):
+        print(f'  brand tile left as-is (two-tone design): {name}')
+        return None
+    kind = classes(layer, fit)
+    if stray_tile(layer, fit, kind) > 0.03:
+        print(f'  brand tile left as-is (tile not fully explained): {name}')
+        return None
+    b = tuple(round(v) for v in at(fit, C / 2, C / 2))
+    return fit, kind, b, ink_and_paper(layer, kind), many_hued(fit)
+
+def hls(c, l=None, dl=0.0, ds=0.0, dh=0.0):
+    h, ll, s = colorsys.rgb_to_hls(*(v / 255 for v in c))
+    ll = l if l is not None else ll + dl
+    r = colorsys.hls_to_rgb((h + dh) % 1, min(1, max(0, ll)), min(1, max(0, s + ds)))
+    return tuple(round(v * 255) for v in r)
+
+def brand_palette(b, variant):
+    """(ramp top, ramp bottom, ink, paper). Light: the brand as a ramp, a
+    little lighter and cooler at the top, ink a deep brand shade, paper the
+    light tile's white. Dark: the brand deepened, ink near-black brand, paper a
+    pale brand tint. Step 5d's brand_palette is the same: keep them equal."""
+    if variant == 'light':
+        top, bot = hls(b, dl=.08, ds=.04, dh=-.012), hls(b, dl=-.10, dh=.012)
+        ink, paper = hls(b, l=.16, ds=.1), LIGHT_TOP
+    else:
+        l = colorsys.rgb_to_hls(*(v / 255 for v in b))[1]
+        top_l = min(.26, l)
+        top, bot = hls(b, l=top_l, ds=-.05), hls(b, l=max(.06, top_l - .12), ds=-.1)
+        ink = hls(b, l=.07)
+        paper = tuple(round(v + (255 - v) * .72) for v in b)
+    return top, bot, ink, paper
+
+def deepen(c):
+    """a many-hued tile's colour in the dark theme: as deep as the brand ramp,
+    its hue kept (step 5d deepens such a tile's gradient stops the same way)."""
+    return hls(c, l=max(.06, min(.26, colorsys.rgb_to_hls(*(v / 255 for v in c))[1]) - .06),
+               ds=-.08)
+
+def ink_map(ink, paper):
+    """neutral colours onto the ink -> paper ramp by luma; colour stays."""
+    def f(c):
+        w = neutral(c)
+        t = min(max((luma(c) - 0.05) / 0.85, 0.0), 1.0)
+        return tuple(v + (i + (p - i) * t - v) * w for v, i, p in zip(c, ink, paper))
+    return f
+
+def brand_ground(brand, variant):
+    """the repainted tile, shade and glow pixels: {(x, y): colour}. One brand
+    colour: its ramp. Many hues: the tile's own colours (deepened in the dark
+    theme) under the same sheen."""
+    fit, kind, b, _, many = brand
+    top, bot = brand_palette(b, variant)[:2]
+    rows = tile_rows(top, bot, BRAND_HL[variant], DARK_HL_SPAN)
+    res = {}
+    for (x, y), (k, v) in kind.items():
+        if k == 'art':
+            continue
+        if many:
+            c = at(fit, x, y)
+            c = deepen(c) if variant == 'dark' else c
+            a = BRAND_HL[variant] * max(0.0, 1.0 - min(max((y - MARGIN) / TILE, 0.0), 1.0)
+                                        / DARK_HL_SPAN)
+            t = tuple(u + (255 - u) * a for u in c)
+        else:
+            t = rows[y]
+        res[x, y] = (t if k == 'tile' else tuple(u * v for u in t) if k == 'shade'
+                     else tuple(u + (255 - u) * v for u in t))
+    return res
+
+def rebrand(layer, brand, ground, tone=None):
+    """the layer on its brand tile (ground from brand_ground), its art mapped
+    through tone (None: left as it is)."""
+    kind = brand[1]
+    tone = tone or (lambda c: c)
+    src = layer.load()
+    out = layer.copy()
+    px = out.load()
+    res = dict(ground)
+    for (x, y), (k, _) in kind.items():
+        if k != 'art':
+            continue
+        c = src[x, y][:3]
+        bg = [(x + dx, y + dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1)
+              if kind.get((x + dx, y + dy), ('art',))[0] != 'art']
+        if not bg:
+            res[x, y] = tone(c)       # inside the art: opaque, whatever its colour
+            continue
+        # Anti-aliased edge: c = al * A + (1 - al) * the background pixel next
+        # to it, A being the art colour nearby. Fractional alpha only here: an
+        # unmix of every pixel against the tile reads opaque art close to the
+        # tile colour as translucent, and the dark tile then shows through it.
+        mx = sum(q[0] for q in bg) / len(bg)
+        my = sum(q[1] for q in bg) / len(bg)
+        q = min(bg, key=lambda q: (q[0] - mx) ** 2 + (q[1] - my) ** 2)
+        pb = src[q][:3]
+        near = [src[x + dx, y + dy][:3] for dx in range(-2, 3) for dy in range(-2, 3)
+                if kind.get((x + dx, y + dy), ('',))[0] == 'art']
+        A = max(near, key=lambda a: sum((u - w) ** 2 for u, w in zip(a, pb)))
+        d = [u - w for u, w in zip(A, pb)]
+        n = sum(t * t for t in d)
+        al = 1.0 if n == 0 else min(max(sum((u - w) * t for u, w, t in zip(c, pb, d)) / n, 0.0), 1.0)
+        res[x, y] = tuple(al * a + (1 - al) * o for a, o in zip(tone(A), res[q]))
+    for (x, y), v in res.items():
+        px[x, y] = tuple(min(255, max(0, round(u))) for u in v) + (src[x, y][3],)
+    return out
+
+# Legibility, measured on 128 px copies like step 5d's renders: the luma steps
+# of 0.15 and up between pixels 2 px apart inside the squircle.
+S128 = 128
+_IN128 = Image.new('L', (S128, S128), 0)
+ImageDraw.Draw(_IN128).rounded_rectangle([10, 10, 117, 117], radius=24, fill=255)
+IN128 = _IN128.load()
+PTS128 = [(x, y) for y in range(0, S128, 2) for x in range(0, S128, 2) if IN128[x, y] == 255]
+
+def edge_steps(im):
+    L = im.convert('L').load()
+    out = {}
+    for x, y in PTS128:
+        for q in ((x + 2, y), (x, y + 2)):
+            if q[0] < S128 and q[1] < S128 and IN128[q] == 255 and abs(L[x, y] - L[q]) >= 38:
+                out[(x, y), q] = abs(L[x, y] - L[q])
+    return out
+
+def legible(r, steps, art):
+    """The outlines that made the icon read still show: three in five of the
+    original's luma steps keep a third of their contrast (and 0.08); or the art
+    is a panel (JetBrains' black square) whose own content keeps reading, even
+    if its edge melts into the deep tile. Step 5d tests its tiles the same way."""
+    if len(steps) < 40:
+        return True
+    L = r.convert('L').load()
+    kept = inner = inner_kept = 0
+    for (p, q), d in steps.items():
+        ok = abs(L[p] - L[q]) >= max(20, d / 3)
+        kept += ok
+        if p in art and q in art:
+            inner += 1
+            inner_kept += ok
+    return kept >= 0.6 * len(steps) or (inner >= 0.25 * len(steps) and inner_kept >= 0.8 * inner)
+
+def small(im):
+    return im.resize((S128, S128), Image.LANCZOS)
+
+def brand_variant(layer, brand, variant):
+    """The icon on its brand tile for one theme, or None when nothing keeps
+    its art readable there. Neutral art is toned to the brand (ink and paper
+    only, not grey material); in the dark theme, dark art straight on the tile
+    (Spotify's waves) that would sink into the deep tile has the tone map run
+    the other way round instead, whatever it is."""
+    _, kind, b, tint, _ = brand
+    _, _, ink, paper = brand_palette(b, variant)
+    ground = brand_ground(brand, variant)
+    am = Image.new('L', (C, C), 0)
+    ap = am.load()
+    for p, (k, _) in kind.items():
+        if k == 'art':
+            ap[p] = 255
+    am = am.resize((S128, S128), Image.BOX).load()
+    art = {p for p in PTS128 if am[p] >= 128}
+    steps = edge_steps(small(layer))
+    out = rebrand(layer, brand, ground)
+    plans = [ink_map(ink, paper)] if tint else []
+    if variant == 'dark':
+        plans.append(ink_map(paper, ink))
+    for i, f in enumerate(plans):
+        if variant == 'dark' and i == len(plans) - 1 and legible(small(out), steps, art):
+            break                     # reads as it is: no need to turn it round
+        cand = rebrand(layer, brand, ground, f)
+        if legible(small(cand), steps, art):
+            out = cand
+            break
+    if not legible(small(out), steps, art):
+        return None
+    return Image.alpha_composite(Image.alpha_composite(SHADOW, out), BRAND_EDGE[variant])
+
+RIM_BRAND = rim_layer(BRAND_RIM)
+BRAND_EDGE = {
+    'light': Image.alpha_composite(RIM_BRAND, BORDER_DARKLINE),
+    'dark': RIM_BRAND,
+}
+BRANDED = []    # names that got a brand tile, for the summary
+KEPT_PLAIN = []  # (name, theme) whose art would not read on the brand tile
+
 def prepare(glyph, name):
     """classify once; return (light_icon, dark_icon, glyph). The two icons are
     the same object unless the artwork supplies its own neutral backdrop."""
@@ -973,6 +1403,14 @@ def prepare(glyph, name):
                 layer.paste(bleed_backdrop(glyph), (MARGIN, MARGIN))
             layer.alpha_composite(cover_resize(glyph, TILE), (MARGIN, MARGIN))
         layer.putalpha(ImageChops.multiply(layer.getchannel('A'), MASK))
+        brand = brand_tile(layer, name)
+        branded = {}
+        if brand is not None:
+            BRANDED.append(name)
+            branded = {v: brand_variant(layer, brand, v) for v in ('light', 'dark')}
+            KEPT_PLAIN.extend((name, v) for v, im in branded.items() if im is None)
+            if None not in branded.values():
+                return branded['light'], branded['dark'], None
         stats = rim_stats(layer)
         # a smooth neutral tile of its own (Proton Pass's white, haruna's
         # graphite) is swapped for the standard one; brand colours and cover
@@ -993,9 +1431,16 @@ def prepare(glyph, name):
             dark = retile(layer, back, 'dark', dark_px) if back else darkify(layer)
         elif back:
             dark = retile(layer, back, own)
-        light = Image.alpha_composite(Image.alpha_composite(SHADOW, light), BORDER_DARKLINE)
+        # every tile but a light one gets the corner glass, in both themes
+        # (white glass on a white tile is invisible)
+        edge = (Image.alpha_composite(RIM_GLOW, BORDER_DARKLINE)
+                if rim_stats(light)[1] < 0.8 else BORDER_DARKLINE)
+        light = Image.alpha_composite(Image.alpha_composite(SHADOW, light), edge)
         dark = Image.alpha_composite(Image.alpha_composite(SHADOW, dark), RIM_GLOW)
-        return light, dark, None
+        # a brand tile for the theme where its art reads, the plain one where
+        # it would not
+        return tuple(branded[v] if branded.get(v) is not None else im
+                     for v, im in (('light', light), ('dark', dark))) + (None,)
     # 3. shaped / transparent logo: it gets centred on a per-variant tile.
     scale = min(GLYPH_BOX / w, GLYPH_BOX / h)
     gw, gh = max(1, round(w * scale)), max(1, round(h * scale))
@@ -1009,11 +1454,8 @@ def compose(prepared, variant):
     icon.alpha_composite(g, ((C - g.width) // 2, (C - g.height) // 2))
     return icon
 
-done = fail = 0
-for line in open(worklist):
-    line = line.rstrip('\n')
-    if not line:
-        continue
+def make(line):
+    """One app's icon at every size in both themes; an error line if it failed."""
     name, src = line.split('\t', 1)
     try:
         prepared = prepare(load_512(src), name)
@@ -1022,13 +1464,39 @@ for line in open(worklist):
             for s in SIZES:
                 out = icon if s == C else icon.resize((s, s), Image.LANCZOS)
                 out.save(os.path.join(out_dir, 'apps', str(s), name + '.png'))
-        done += 1
     except Exception as e:
-        fail += 1
-        print(f'  FAIL {name}: {e}', file=sys.stderr)
-print(f'Generated {done} icons x2 variants ({fail} failed).')
+        return f'  FAIL {name}: {e}'
+    return None
+
+# Apps are independent of each other (brand_tile() seeds its own Random), and
+# rsvg-convert and most of Pillow run outside the GIL, so threads share the work.
+jobs = [ln.rstrip('\n') for ln in open(worklist) if ln.strip()]
+fails = []
+tty = sys.stdout.isatty()
+with ThreadPoolExecutor(os.cpu_count() or 4) as pool:
+    futures = [pool.submit(make, j) for j in jobs]
+    for i, f in enumerate(as_completed(futures), 1):
+        if f.result():
+            fails.append(f.result())
+        if tty:
+            print(f'\r  making tiles: {i}/{len(jobs)}', end='', flush=True)
+if tty:
+    print()
+for err in sorted(fails):
+    print(err, file=sys.stderr)
+print(f'Generated {len(jobs) - len(fails)} icons x2 variants ({len(fails)} failed; '
+      f'{len(BRANDED)} on a brand tile).')
+for name, theme in sorted(KEPT_PLAIN):
+    print(f'  brand tile left out in the {theme} theme (art would not read): {name}')
 PYEOF
-fi
+  rm -f "$WORKLIST"
+}
+# <<< tiles
+
+# >>> prebuilt
+# Steps 5b-5e: MacTahoe's own app SVGs. Only --rebuild runs them all, on fresh
+# copies of vendor/, and stores the result as prebuilt/ (rebuild_prebuilt,
+# below); a normal run reruns 5d and 5e for keep-dark.conf's icons alone.
 
 # --- 5b. Dark-tile copies of MacTahoe's own app SVGs --------------------------
 # MacTahoe-dark/apps/scalable is a symlink to MacTahoe/apps/scalable: upstream
@@ -1036,7 +1504,9 @@ fi
 # near-white linearGradient (or a mid grey one for apps with a white logo).
 # Re-tint just that gradient into the near-black glass tile, add the top sheen,
 # and drop the results into the dark theme, where they shadow MacTahoe's.
-python3 - "$MACTAHOE/apps/scalable" "$THEME_DARK/apps/scalable" \
+# $1: MacTahoe's app SVGs, $2: the dark theme's apps/scalable.
+step_5b() {
+python3 - "$1" "$2" \
          "$DARK_TILE_TOP" "$DARK_TILE_BOT" "$DARK_TILE_HL" "$DARK_TILE_HL_SPAN" <<'PYEOF'
 import os, re, subprocess, sys, tempfile
 from PIL import Image
@@ -1069,19 +1539,48 @@ def luma(c):
 HI, LO = rgb(sys.argv[3]), rgb(sys.argv[4])   # tile top, tile bottom
 HL, HL_SPAN = float(sys.argv[5]), float(sys.argv[6])
 
-def retint(m, seen):
+STOP_EL = re.compile(r'<stop\b[^>]*/>')
+STYLE_COLOR = re.compile(r'(stop-color\s*:\s*)(#[0-9a-fA-F]{3,6})')
+
+def drawn(stop):
+    """the colour a <stop> is drawn with: a stop-color in its style beats the
+    attribute. Some MacTahoe tiles keep the template's grey attributes and get
+    their real colour (Zen Twilight's purple) through the style."""
+    m = STYLE_COLOR.search(stop) or STOP.search(stop)
+    return m.group(2) if m else '#000'
+
+FILL_REF = re.compile(r'<[a-zA-Z]+\b[^>]*\bfill="url\(#([^)]+)\)"[^>]*>')
+STYLE_FILL = re.compile(r'\bstyle="[^"]*?\bfill\s*:\s*([^;"]+)')
+
+def stale(s):
+    """Ids of gradients a shape names in its fill attribute while its style
+    paints it with something else: leftovers of MacTahoe's template, not the
+    tile. Half-Life: Alyx's tile is drawn brown over an unused grey template
+    gradient; maxint's template gradient paints its white logo."""
+    out = set()
+    for m in FILL_REF.finditer(s):
+        f = STYLE_FILL.search(m.group(0))
+        if f and f.group(1).strip() != 'url(#%s)' % m.group(1):
+            out.add(m.group(1))
+    return out
+
+def retint(m, seen, skip):
     block = m.group(0)
     hexes = [c for _, c, _ in STOP.findall(block)]
     if not hexes:
+        return block
+    gid = ID.search(GRAD_OPEN.match(block).group(1))
+    if gid and gid.group(1) in skip:
         return block
     lit = any(c.lower() in SIG_LIGHT for c in hexes)
     drk = any(c.lower() in SIG_DARK for c in hexes)
     if not (lit or drk):
         return block
-    cols = [rgb(c) for c in hexes]
-    # only touch gradients that are entirely neutral: those are tiles, never
-    # artwork. The light tile must also be light and the grey tile mid-dark,
-    # so a brand gradient that merely grazes a signature colour is left alone.
+    cols = [rgb(drawn(s)) for s in STOP_EL.findall(block)]
+    # only touch gradients that are entirely neutral as drawn: those are tiles,
+    # never artwork. The light tile must also be light and the grey tile
+    # mid-dark, so a brand gradient that merely grazes a signature colour is
+    # left alone (5d makes it a brand tile).
     if any(max(c) - min(c) > 14 for c in cols):
         return block
     if lit and any(luma(c) < 0.88 for c in cols):
@@ -1094,11 +1593,12 @@ def retint(m, seen):
 
     def one(sm):
         t = 0.5 if hi - lo < 1e-6 else (next(seq) - lo) / (hi - lo)
-        col = tuple(round(a + (b - a) * t) for a, b in zip(LO, HI))
-        return sm.group(1) + '#%02x%02x%02x' % col + sm.group(3)
+        col = '#%02x%02x%02x' % tuple(round(a + (b - a) * t) for a, b in zip(LO, HI))
+        # the attribute and the style both, so whichever wins draws the tile
+        s = STOP.sub(lambda c: c.group(1) + col + c.group(3), sm.group(0))
+        return STYLE_COLOR.sub(lambda c: c.group(1) + col, s)
 
-    out = STOP.sub(one, block)
-    gid = ID.search(GRAD_OPEN.match(block).group(1))
+    out = STOP_EL.sub(one, block)
     if gid and seen[0] is None:
         seen[0] = (gid.group(1), block)
     return out
@@ -1214,7 +1714,8 @@ for name in sorted(os.listdir(src_dir)):
     with open(p, encoding='utf-8', errors='surrogateescape') as f:
         s = f.read()
     seen = [None]                     # (id, original markup) of the tile ramp
-    out = GRAD.sub(lambda m: retint(m, seen), s)  # noqa: B023 -- called before seen rebinds
+    skip = stale(s)
+    out = GRAD.sub(lambda m: retint(m, seen, skip), s)  # noqa: B023 -- called before seen rebinds
     if out == s:
         continue
     hl = False
@@ -1259,6 +1760,7 @@ print(f'Re-tinted {len(retinted)} MacTahoe app SVGs for the dark theme '
       f'+{linked} aliases); '
       f'{kept_light} kept light for legibility.')
 PYEOF
+}
 
 # --- 5c. Tahoe dark Finder ----------------------------------------------------
 # 5b only re-tints near-white tiles; Finder's tile is a saturated blue gradient,
@@ -1268,7 +1770,9 @@ PYEOF
 # The match strings are exact on purpose. A MacTahoe release that changes this
 # markup fails loudly, but the patch is all-or-nothing and the rest of the build
 # goes on: the dark Finder just stays MacTahoe's own until the strings are fixed.
-if ! python3 - "$THEME_DARK/apps/scalable/file-manager.svg" <<'PYEOF'
+# $1: the dark theme's file-manager.svg.
+step_5c() {
+if ! python3 - "$1" <<'PYEOF'
 import os, sys
 
 path = sys.argv[1]
@@ -1343,6 +1847,7 @@ PYEOF
 then
   echo "  warning: dark Finder skipped (see above); the build continues" >&2
 fi
+}
 
 # --- 5d. One shadow under every tile; light tiles in the light theme ----------
 # MacTahoe draws each app's shadow its own way (an embedded PNG, stacks of faint
@@ -1355,16 +1860,20 @@ fi
 # (kitty, VS Code, terminals, ...) take the light ramp, with white glyphs made
 # dark where they would vanish. Every other neutral tile, in both themes, is
 # repainted with step 5's light or dark ramp: MacTahoe's own come in a dozen
-# whites, greys and blacks. Every edit is re-rendered: the tile interior must
+# whites, greys and blacks. Every coloured tile becomes a brand tile, like step
+# 5's (see BRAND_TILE_*). Every edit is re-rendered: the tile interior must
 # come out unchanged (bar the tile's own colour) and art poking outside the
 # tile must survive, or the icon stays exactly as MacTahoe drew it.
 # Runs before 5e's rim, so the dark theme's untouched SVGs are still identical
 # to the light theme's and reuse its result instead of being worked out again.
-python3 - "$THEME_LIGHT/apps/scalable" "$THEME_DARK/apps/scalable" \
+# $1, $2: the light and dark themes' apps/scalable, $3: the keep-dark list.
+step_5d() {
+python3 - "$1" "$2" \
          "$LIGHT_TILE_TOP" "$LIGHT_TILE_BOT" "$TILE_SHADOW_ALPHA" "$TILE_SHADOW_BLUR" \
-         "$TILE_SHADOW_DROP" "$TILE_OUTLINE_ALPHA" "$KEEP_DARK_FILE" \
-         "$DARK_TILE_TOP" "$DARK_TILE_BOT" "$DARK_TILE_HL" "$DARK_TILE_HL_SPAN" <<'PYEOF'
-import base64, functools, hashlib, io, os, re, subprocess, sys, xml.parsers.expat
+         "$TILE_SHADOW_DROP" "$TILE_OUTLINE_ALPHA" "$3" \
+         "$DARK_TILE_TOP" "$DARK_TILE_BOT" "$DARK_TILE_HL" "$DARK_TILE_HL_SPAN" \
+         "$BRAND_TILE_HL_LIGHT" "$BRAND_TILE_HL_DARK" <<'PYEOF'
+import base64, colorsys, functools, hashlib, io, math, os, re, subprocess, sys, xml.parsers.expat
 from concurrent.futures import ThreadPoolExecutor
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
@@ -2046,6 +2555,766 @@ def lighten(b):
         return None, 'unreadable'             # pale colour on white, or a bitmap
     return soften_shadows(nb2, k), 'lit+glyphs'
 
+# --- coloured tile -> brand tile ---------------------------------------------
+# A tile whose paint is coloured (a brand colour, or a tinted neutral that
+# standard() leaves alone) is repainted the way step 5 paints a brand tile: its
+# colour as a Tahoe ramp, lighter at the top in the light theme and deep in the
+# dark one, with a sheen, and its neutral art toned to that colour (ink to a
+# deep shade; paper to white in light, to a pale tint in dark). A tile of two or
+# more hues is a design: its own gradient stays, deepened stop by stop in dark,
+# under the same sheen. 5e adds the corner glass. Every edit is checked by
+# rendering, and an icon that fails a check keeps MacTahoe's own tile.
+BRAND_HL = {'light': float(sys.argv[14]), 'dark': float(sys.argv[15])}
+SPAN = DHL_SPAN
+SINGLE_HUE = 0.25          # circular std of the tile's hue, radians
+
+def hls(c, l=None, dl=0.0, ds=0.0, dh=0.0):
+    h, ll, s = colorsys.rgb_to_hls(*(v / 255 for v in c))
+    ll = l if l is not None else ll + dl
+    r = colorsys.hls_to_rgb((h + dh) % 1, min(1, max(0, ll)), min(1, max(0, s + ds)))
+    return tuple(round(v * 255) for v in r)
+
+def brand_palette(b, variant):
+    """(ramp top, ramp bottom, ink, paper): step 5's brand_palette, kept equal."""
+    if variant == 'light':
+        top, bot = hls(b, dl=.08, ds=.04, dh=-.012), hls(b, dl=-.10, dh=.012)
+        ink, paper = hls(b, l=.16, ds=.1), HI
+    else:
+        top_l = min(.26, colorsys.rgb_to_hls(*(v / 255 for v in b))[1])
+        top, bot = hls(b, l=top_l, ds=-.05), hls(b, l=max(.06, top_l - .12), ds=-.1)
+        ink, paper = hls(b, l=.07), tuple(round(v + (255 - v) * .72) for v in b)
+    return top, bot, ink, paper
+
+def sheen_at(variant, t):
+    return BRAND_HL[variant] * max(0.0, 1.0 - t / SPAN)
+
+def brand_at(pal, variant, t):
+    col = [round(a + (c - a) * t) for a, c in zip(pal[0], pal[1])]
+    a = sheen_at(variant, t)
+    return tuple(round(c + (255 - c) * a) for c in col)
+
+def deepen(c):
+    """a stop of a many-hued tile, in the dark theme: as deep as the brand ramp
+    (step 5's deepen, kept equal)."""
+    return hls(c, l=max(.06, min(.26, colorsys.rgb_to_hls(*(v / 255 for v in c))[1]) - .06),
+               ds=-.08)
+
+def row_t(y):
+    return min(max((y + 0.5 - 4 * K) / (56 * K), 0.0), 1.0)
+
+def neutral(c):
+    """1 for black, white and greys up to a chroma of 0.10, 0 from 0.22."""
+    return 1.0 - min(max(((max(c) - min(c)) / 255 - 0.10) / 0.12, 0.0), 1.0)
+
+def ink_map(ink, paper):
+    """neutral colours onto the ink -> paper ramp by luma; colour stays."""
+    def f(c):
+        w = neutral(c)
+        if w <= 0.0:
+            return tuple(c)
+        t = min(max((luma(c) - 0.05) / 0.85, 0.0), 1.0)
+        return tuple(round(v + (i + (p - i) * t - v) * w) for v, i, p in zip(c, ink, paper))
+    return f
+
+INSIDE_PTS = [(x, y) for y in range(0, N, 2) for x in range(0, N, 2) if IN[x, y] == 255]
+
+def cubic(x, y):
+    u, v = (x - N / 2) / (N / 2), (y - N / 2) / (N / 2)
+    return (1.0, u, v, u * u, v * v, u * v, u * u * u, v * v * v, u * u * v, u * v * v)
+
+def lsq(pts):
+    """per-channel least-squares cubic surface through (x, y, rgb) points."""
+    n = 10
+    a = [[0.0] * n for _ in range(n)]
+    b = [[0.0] * n for _ in range(3)]
+    for x, y, c in pts:
+        t = cubic(x, y)
+        for i in range(n):
+            for j in range(n):
+                a[i][j] += t[i] * t[j]
+            for k in range(3):
+                b[k][i] += t[i] * c[k]
+    out = []
+    for k in range(3):
+        m = [row[:] + [b[k][i]] for i, row in enumerate(a)]
+        for c in range(n):
+            p = max(range(c, n), key=lambda r: abs(m[r][c]))
+            m[c], m[p] = m[p], m[c]
+            if abs(m[c][c]) < 1e-12:
+                return None
+            for r in range(n):
+                if r != c:
+                    f = m[r][c] / m[c][c]
+                    m[r] = [u - f * w for u, w in zip(m[r], m[c])]
+        out.append([m[i][n] / m[i][i] for i in range(n)])
+    return out
+
+def tile_paint(t_el):
+    """(brand colour, many-hued?) of the tile drawn on its own, or (None, why):
+    whatever shows through a notch in it (MacTahoe's page curls) is art. The
+    tile must cover most of the squircle, be a smooth gradient (not a picture
+    or a pattern) and be coloured; the brand colour is its colour at the
+    centre."""
+    px = t_el.load()
+    pts = [(x, y, px[x, y][:3]) for x, y in INSIDE_PTS if px[x, y][3] >= 250]
+    if len(pts) < 0.75 * len(INSIDE_PTS):
+        return None, 'holes'
+    fit = lsq(pts)
+    if fit is None:
+        return None, 'texture'
+    on = sum(1 for x, y, c in pts
+             if max(abs(c[k] - sum(u * w for u, w in zip(fit[k], cubic(x, y))))
+                    for k in range(3)) <= 10)
+    if on < 0.9 * len(pts):
+        return None, 'texture'
+    mid = [c for x, y, c in pts if abs(x - N / 2) <= 12 and abs(y - N / 2) <= 12]
+    if not mid:
+        return None, 'holes'
+    b = tuple(round(sum(c[i] for c in mid) / len(mid)) for i in range(3))
+    if max(b) - min(b) < 16:
+        return None, 'neutral'
+    hs = [colorsys.rgb_to_hsv(*(v / 255 for v in c))[0]
+          for x, y, c in pts if max(c) - min(c) >= 24]
+    if not hs:
+        return b, False
+    sx = sum(math.cos(2 * math.pi * h) for h in hs) / len(hs)
+    sy = sum(math.sin(2 * math.pi * h) for h in hs) / len(hs)
+    r = min(max(math.hypot(sx, sy), 1e-9), 1.0)
+    return b, math.sqrt(max(0.0, -2 * math.log(r))) > SINGLE_HUE
+
+# --- paints as the renderer resolves them -------------------------------------
+RULE = re.compile(r'([^{}]+)\{([^}]*)\}')
+DECL = re.compile(r'(?:^|;)\s*([\w-]+)\s*:\s*([^;]+)')
+NAMED = {'white': (255, 255, 255), 'black': (0, 0, 0), 'gray': (128, 128, 128),
+         'grey': (128, 128, 128), 'silver': (192, 192, 192)}
+INHERITED = {'fill': True, 'stroke': True, 'color': True,
+             'stop-color': False, 'stop-opacity': False}
+INITIAL = {'fill': 'black', 'stroke': 'none', 'color': 'black',
+           'stop-color': 'black', 'stop-opacity': '1'}
+
+def css_rules(b, root):
+    """class, id and type selectors of the file's <style> sheets (anything more
+    elaborate is ignored; the pinned render in brandify catches what that
+    misses)."""
+    rules = []
+    for n in preorder(root):
+        if n.tag != 'style':
+            continue
+        text = re.sub(r'<!\[CDATA\[|\]\]>|<[^>]*>', '',
+                      b[n.start:n.end].decode('utf-8', 'replace'))
+        for m in RULE.finditer(text):
+            props = {d.group(1).strip(): d.group(2).strip() for d in DECL.finditer(m.group(2))}
+            for sel in (s.strip() for s in m.group(1).split(',')):
+                if re.fullmatch(r'\.[\w-]+', sel):
+                    rules.append((1, len(rules), 'class', sel[1:], props))
+                elif re.fullmatch(r'#[\w-]+', sel):
+                    rules.append((2, len(rules), 'id', sel[1:], props))
+                elif re.fullmatch(r'[a-zA-Z]+', sel):
+                    rules.append((0, len(rules), 'tag', sel, props))
+    return rules
+
+def declared(n, prop, rules):
+    """n's own value for prop: style attribute, then CSS, then the attribute."""
+    v = None
+    for m in DECL.finditer(n.attrs.get('style', '')):
+        if m.group(1) == prop:
+            v = m.group(2).strip()
+    if v is not None:
+        return v
+    best, classes = None, n.attrs.get('class', '').split()
+    for spec, order, kind, name, props in rules:
+        if prop in props and ((kind == 'class' and name in classes)
+                              or (kind == 'id' and n.attrs.get('id') == name)
+                              or (kind == 'tag' and n.tag == name)):
+            if best is None or (spec, order) >= best[:2]:
+                best = (spec, order, props[prop])
+    return best[2] if best else n.attrs.get(prop)
+
+def computed(n, prop, rules):
+    while n is not None:
+        v = declared(n, prop, rules)
+        if v is not None and v != 'inherit':
+            return v
+        if v is None and not INHERITED[prop]:
+            return INITIAL[prop]
+        n = n.parent
+    return INITIAL[prop]
+
+def colour(v):
+    v = v.strip()
+    if re.fullmatch(r'#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})', v):
+        return rgb(v)
+    if v.lower() in NAMED:
+        return NAMED[v.lower()]
+    m = re.fullmatch(r'rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)', v)
+    return tuple(int(g) for g in m.groups()) if m else None
+
+def paint(n, prop, rules):
+    """('none',), ('rgb', colour), ('url', id) or ('?', raw value)."""
+    v = computed(n, prop, rules)
+    if v in ('none', 'transparent'):
+        return ('none',)
+    if v == 'currentColor':
+        v = computed(n, 'color', rules)
+    m = re.match(r'\s*url\(\s*#([^)\s]+)\s*\)', v)
+    if m:
+        return ('url', m.group(1))
+    c = colour(v)
+    return ('rgb', c) if c is not None else ('?', v)
+
+def with_style(tag, prop, value):
+    """a start tag with prop:value in its style, which beats a presentation
+    attribute and a CSS class."""
+    m = STYLE.search(tag)
+    pv = prop.encode() + b':' + value.encode()
+    if m:
+        body = m.group(2)
+        f = re.search(rb'(?:^|;)\s*' + re.escape(prop.encode()) + rb'\s*:\s*([^;]*)', body)
+        if f:
+            body = body[:f.start(1)] + value.encode() + body[f.end(1):]
+        else:
+            body = (body.rstrip().rstrip(b';') + b';' if body.strip() else b'') + pv
+        return tag[:m.start(2)] + body + tag[m.end(2):]
+    at = len(tag) - (2 if tag.endswith(b'/>') else 1)
+    return tag[:at] + b' style="' + pv + b'"' + tag[at:]
+
+GEOM = {'linearGradient': ('x1', 'y1', 'x2', 'y2'),
+        'radialGradient': ('cx', 'cy', 'r', 'fx', 'fy', 'fr')}
+COMMON = ('gradientUnits', 'gradientTransform', 'spreadMethod')
+
+def copy_gradient(root, gid, newid, f, rules, pin=False):
+    """A gradient with every stop colour passed through f, written out whole
+    (attributes it inherits through href resolved, no href left) so the
+    original stays as it is for whatever else uses it. '' when f changes no
+    stop, None when it can't be copied."""
+    ch, g = [], by_id(root, gid)
+    while g is not None and len(ch) < 8 and g.tag in GEOM:
+        ch.append(g)
+        h = g.attrs.get('xlink:href') or g.attrs.get('href') or ''
+        g = by_id(root, h[1:]) if h.startswith('#') else None
+    if not ch:
+        return None
+    attrs = {}
+    for a in COMMON + GEOM[ch[0].tag]:
+        for n in ch:
+            if a in n.attrs and (a in COMMON or n.tag == ch[0].tag):
+                attrs[a] = n.attrs[a]
+                break
+    holder = next((n for n in ch if any(k.tag == 'stop' for k in n.kids)), None)
+    if holder is None:
+        return None
+    stops, moved_any = [], False
+    for s in (k for k in holder.kids if k.tag == 'stop'):
+        c = colour(computed(s, 'stop-color', rules))
+        if c is None:
+            return None
+        nc = f(c)
+        moved_any |= nc != c
+        stops.append('<stop offset="%s" stop-color="#%02x%02x%02x" stop-opacity="%s"/>'
+                     % ((s.attrs.get('offset', '0'),) + tuple(c if pin else nc)
+                        + (computed(s, 'stop-opacity', rules),)))
+    if not moved_any:
+        return ''
+    head = ' '.join('%s="%s"' % (a, v.replace('"', '&quot;')) for a, v in attrs.items())
+    return '<%s id="%s" %s>%s</%s>' % (ch[0].tag, newid, head, ''.join(stops), ch[0].tag)
+
+LEAVES = {'path', 'rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon',
+          'text', 'tspan', 'use', 'image'}
+NOT_ART = {'defs', 'mask', 'clipPath', 'filter', 'pattern', 'symbol', 'marker',
+           'style', 'title', 'desc', 'metadata'}
+
+def art_leaves(root, spans):
+    """the shapes in spans (whole elements), this script's own markup aside."""
+    by_start = {n.start: n for n in preorder(root)}
+    out = []
+    for s, _ in spans:
+        stack = [by_start[s]] if s in by_start else []
+        while stack:
+            x = stack.pop()
+            if x.tag in NOT_ART or (x.attrs.get('id') or '').startswith('tahoe'):
+                continue
+            if x.tag in LEAVES:
+                out.append(x)
+            if x.tag not in LEAVES or x.tag == 'text':
+                stack += x.kids
+    return out
+
+def recolour(b, root, nodes, f, tag_id, pin=False):
+    """-> (edits, extra markup, blind spans): every paint of nodes that f
+    changes, written into the node's style -- recoloured, or with pin as it
+    already is, which must render exactly like the original. Blind: shapes whose
+    paint can't be recoloured here (bitmaps, <use>, values this can't read)."""
+    rules = css_rules(b, root)
+    edits, extra, copies, blind = [], [], {}, []
+    for n in nodes:
+        if n.tag in ('image', 'use'):
+            blind.append((n.start, n.end))
+            continue
+        e = tag_end(b, n.start)
+        tag = new = b[n.start:e]
+        for prop in ('fill', 'stroke'):
+            p = paint(n, prop, rules)
+            if p[0] == 'rgb' and f(p[1]) != p[1]:
+                new = with_style(new, prop, '#%02x%02x%02x' % (p[1] if pin else f(p[1])))
+            elif p[0] == 'url':
+                if p[1] not in copies:
+                    nid = '%s%d' % (tag_id, len(copies))
+                    copies[p[1]] = (nid, copy_gradient(root, p[1], nid, f, rules, pin))
+                    extra.append(copies[p[1]][1] or '')
+                nid, mk = copies[p[1]]
+                if mk:
+                    new = with_style(new, prop, 'url(#%s)' % nid)
+                elif mk is None:
+                    blind.append((n.start, n.end))
+            elif p[0] == '?':
+                blind.append((n.start, n.end))
+        if new != tag:
+            edits.append((n.start, e, new))
+    return edits, ''.join(extra), blind
+
+def splice(b, edits, extra=''):
+    """b with start tags replaced or markup inserted ((s, e, bytes) each, e == s
+    to insert) and extra appended inside the root."""
+    out, last = [], 0
+    for s, e, t in sorted(edits, key=lambda t: (t[0], t[1])):
+        out += [b[last:s], t]
+        last = e
+    nb = b''.join(out) + b[last:]
+    at = nb.rstrip().rfind(b'</svg>')
+    return nb[:at] + extra.encode() + nb[at:]
+
+def band_off(im, exp, band):
+    """mean distance (0-255) between im and the expected tile along band (the
+    band inside the squircle's edge, where the tile paints it itself)."""
+    d = functools.reduce(ImageChops.lighter,
+                         ImageChops.difference(im.convert('RGB'), exp).split())
+    hist = ImageChops.multiply(d, band).histogram()
+    return sum(i * n for i, n in enumerate(hist)) / max(band.histogram()[255], 1)
+
+def geometries(root):
+    """gradient geometries to try for a vertical ramp over the tile: its bounding
+    box either way up, then the 64-grid in the file's user space."""
+    sp = user_space(root)
+    if sp is None:
+        return []
+    x = sp[2] + 32 * sp[0]
+    return ['x1="0" y1="0" x2="0" y2="1"', 'x1="0" y1="1" x2="0" y2="0"',
+            'x1="%.6g" y1="%.6g" x2="%.6g" y2="%.6g" gradientUnits="userSpaceOnUse"'
+            % (x, sp[3] + 4 * sp[1], x, sp[3] + 60 * sp[1])]
+
+def ramp_tile(b, root, tile, later, pal, variant, band):
+    """-> (edits, extra, tile-only render): the tile on the brand ramp."""
+    exp = Image.new('RGB', (N, N))
+    px = exp.load()
+    for y in range(N):
+        col = brand_at(pal, variant, row_t(y))
+        for x in range(N):
+            px[x, y] = col
+    ts = [SPAN * i / 8 for i in range(9)] + [1.0]
+    stops = ''.join('<stop offset="%.4g" stop-color="#%02x%02x%02x"/>'
+                    % ((t,) + brand_at(pal, variant, t)) for t in ts)
+    s, e = tile.start, tag_end(b, tile.start)
+    edit = (s, e, with_style(b[s:e], 'fill', 'url(#tahoeBrand)'))
+    shift = len(edit[2]) - (e - s)
+    for geom in geometries(root):
+        extra = '<linearGradient id="tahoeBrand" %s>%s</linearGradient>' % (geom, stops)
+        t = render(cut(splice(b, [edit], extra), [(a + shift, z + shift) for a, z in later]))
+        if t is not None and opaque(t) and band_off(t, exp, band) <= 3:
+            return [edit], extra, t
+    return None
+
+def sheened(im, variant):
+    """im under the brand sheen, row by row."""
+    out = im.convert('RGB')
+    px = out.load()
+    for y in range(N):
+        a = sheen_at(variant, row_t(y))
+        for x in range(N):
+            px[x, y] = tuple(round(v + (255 - v) * a) for v in px[x, y])
+    return out
+
+def sheen_tile(b, root, tile, later, t0, variant, band):
+    """-> (edits, extra, tile-only render): a many-hued tile keeps its own
+    gradient (deepened stop by stop in the dark theme) and gets the sheen as a
+    copy of itself painted white -> clear, just above it."""
+    edits, extra, under = [], '', t0
+    if variant == 'dark':
+        rules = css_rules(b, root)
+        p = paint(tile, 'fill', rules)
+        if p[0] != 'url':
+            return None
+        s, e = tile.start, tag_end(b, tile.start)
+        edit = (s, e, with_style(b[s:e], 'fill', 'url(#tahoeDeep)'))
+        sh = len(edit[2]) - (e - s)
+        bare = [(a + sh, z + sh) for a, z in later]
+        # the copy, its stops left as they are, must draw the very same tile
+        pin = copy_gradient(root, p[1], 'tahoeDeep', deepen, rules, pin=True)
+        mk = copy_gradient(root, p[1], 'tahoeDeep', deepen, rules)
+        if not mk:
+            return None
+        tp = render(cut(splice(b, [edit], pin), bare))
+        under = render(cut(splice(b, [edit], mk), bare))
+        if tp is None or under is None or changed_share(tp, t0, 3) > 0.002:
+            return None
+        edits, extra = [edit], mk
+    exp = sheened(under, variant)
+    dup = b[tile.start:tile.end]
+    e = tag_end(dup, 0)
+    head = re.sub(rb'\sid\s*=\s*"[^"]*"', b'', dup[:e], count=1)
+    dup = with_style(with_style(head, 'fill', 'url(#tahoeSheen)'), 'stroke', 'none') + dup[e:]
+    ins = (tile.end, tile.end, dup)
+    shift = sum(len(t) - (z - a) for a, z, t in edits) + len(dup)
+    for geom in geometries(root):
+        grad = ('<linearGradient id="tahoeSheen" %s><stop offset="0" stop-color="#fff" '
+                'stop-opacity="%.4g"/><stop offset="%.4g" stop-color="#fff" stop-opacity="0"/>'
+                '</linearGradient>' % (geom, BRAND_HL[variant], SPAN))
+        nb = splice(b, edits + [ins], extra + grad)
+        t = render(cut(nb, [(a + shift, z + shift) for a, z in later]))
+        if t is not None and opaque(t) and band_off(t, exp, band) <= 3:
+            return edits + [ins], extra + grad, t
+    return None
+
+def changed_share(a, b, tol):
+    return sum(1 for v in changed(a, b, tol).get_flattened_data() if v) / (N * N)
+
+def moved_share(r, orig, t0, t1, slack=10):
+    """share of the squircle that moved further than the tile under it did."""
+    po, pt0, pt1, pr = orig.load(), t0.load(), t1.load(), r.load()
+    bad = 0
+    for x, y in INSIDE_PTS:
+        allow = max(abs(u - v) for u, v in zip(pt1[x, y][:3], pt0[x, y][:3]))
+        bad += max(abs(u - v) for u, v in zip(pr[x, y][:3], po[x, y][:3])) > allow + slack
+    return bad / len(INSIDE_PTS)
+
+SHIFTS = ((2, 0), (0, 2))
+
+def edge_pairs(im):
+    """{(p, shift): luma step} for the luma steps of 0.15 and up between pixels
+    2 px apart inside the squircle."""
+    L = im.convert('L').load()
+    out = {}
+    for x, y in INSIDE_PTS:
+        for dx, dy in SHIFTS:
+            q = (x + dx, y + dy)
+            if q[0] < N and q[1] < N and IN[q] == 255:
+                d = abs(L[x, y] - L[q])
+                if d >= 38:
+                    out[(x, y), (dx, dy)] = d
+    return out
+
+def legible(r, orig, art):
+    """The outlines that made the icon read still show: three in five of the
+    original's luma steps keep a third of their contrast (and 0.08); or the art
+    is a panel (JetBrains' black square, Resolve's face) whose own content keeps
+    reading, even if its edge melts into the deep tile. Step 5 tests its brand
+    tiles the same way."""
+    e0 = edge_pairs(orig)
+    if len(e0) < 40:
+        return True
+    L = r.convert('L').load()
+    kept = inner = inner_kept = 0
+    for (p, (dx, dy)), d in e0.items():
+        q = (p[0] + dx, p[1] + dy)
+        ok = abs(L[p] - L[q]) >= max(20, d / 3)
+        kept += ok
+        if p in art and q in art:
+            inner += 1
+            inner_kept += ok
+    if kept >= 0.6 * len(e0):
+        return True
+    return inner >= 0.25 * len(e0) and inner_kept >= 0.8 * inner
+
+def edge_ring(b, root):
+    """Spans of the shapes painting MacTahoe's white edge ring (an all-white
+    ramp, opaque at both ends and dim in the middle, through a gradient or one
+    that hrefs it). On a deep tile it shows as a hard white outline, which is
+    why 5b drops it from the tiles it darkens; the dark brand tile drops it too
+    (GitHub Desktop's)."""
+    rules = css_rules(b, root)
+    grads = [n for n in preorder(root) if n.tag in GEOM]
+
+    def opacity(s):
+        v = computed(s, 'stop-opacity', rules).strip()
+        try:
+            return float(v[:-1]) / 100 if v.endswith('%') else float(v)
+        except ValueError:
+            return 1.0
+    ring = set()
+    for g in grads:
+        stops = [k for k in g.kids if k.tag == 'stop']
+        if len(stops) < 3 or not g.attrs.get('id'):
+            continue
+        if any(colour(computed(s, 'stop-color', rules)) != (255, 255, 255) for s in stops):
+            continue
+        ops = [opacity(s) for s in stops]
+        if ops[0] >= 0.9 and ops[-1] >= 0.9 and min(ops) < 0.6:
+            ring.add(g.attrs['id'])
+    users = set(ring)
+    for g in grads:
+        h = g.attrs.get('xlink:href') or g.attrs.get('href') or ''
+        if h[1:] in ring and g.attrs.get('id'):
+            users.add(g.attrs['id'])
+    return [(n.start, n.end) for n in preorder(root) if n.tag in LEAVES and users
+            and any(p[0] == 'url' and p[1] in users
+                    for p in (paint(n, 'fill', rules), paint(n, 'stroke', rules)))]
+
+_ZONE = ImageChops.subtract(squircle(0), squircle(-6))   # the tile's outer 3 units
+ZONE, ZONE_AREA = _ZONE.load(), _ZONE.histogram()[255]
+DEEP = squircle(-6).load()                                # the rest of it
+
+def edge_shapes(b, root):
+    """Spans of white shapes that only light the tile's edge: MacTahoe's other
+    edge highlight, a blurred white ring (calc's, Health's). By rendering: at
+    most 15% of the shape's footprint may reach past the tile's outer 3 units
+    (its blur spills outwards too), and it must run along a good part of it."""
+    full = render(b)
+    if full is None:
+        return []
+    rules = css_rules(b, root)
+    out = []
+    for n in art_leaves(root, [(root.start, root.end)]):
+        if not any(p[0] == 'rgb' and min(p[1]) >= 235
+                   for p in (paint(n, 'fill', rules), paint(n, 'stroke', rules))):
+            continue
+        wo = render(cut(b, [(n.start, n.end)]))
+        fp = points(changed(full, wo, 8)) if wo is not None else []
+        deep = sum(1 for p in fp if DEEP[p] == 255)
+        if fp and deep <= 0.15 * len(fp) and \
+                sum(1 for p in fp if ZONE[p] == 255) >= 0.2 * ZONE_AREA:
+            out.append((n.start, n.end))
+    return out
+
+def drop_edge(b, root):
+    """b without its white edge ring or edge highlight shapes, and its tree."""
+    spans = edge_ring(b, root)
+    if spans:
+        b = cut(b, spans)
+        root = parse(b)
+    spans = edge_shapes(b, root) if root is not None else []
+    if spans:
+        b = cut(b, spans)
+        root = parse(b)
+    return b, root
+
+def brandify(b, variant):
+    """-> (bytes, how) with the tile made a brand tile, or (None, why)."""
+    if b'tahoeBrand' in b or b'tahoeSheen' in b:
+        return None, 'done'
+    root = parse(b)
+    if root is None:
+        return None, 'shape'
+    if variant == 'dark':
+        b, root = drop_edge(b, root)
+        if root is None:
+            return None, 'shape'
+    orig = render(b)
+    if not opaque(orig):
+        return None, 'shape'
+    path = find_tile(b, root)
+    if not path:
+        return None, 'shape'
+    tile, later, glass = tile_parts(b, path)
+    if tile is None or glass is not None:
+        return None, 'paint'
+    t0 = render(cut(b, later))
+    chain, n = [], tile
+    while n is not root:
+        chain.append(n)
+        n = n.parent
+    before = siblings(chain, after=False)
+    t_el = render(cut(b, before + later))            # the tile, nothing else
+    if t0 is None or t_el is None:
+        return None, 'paint'
+    bc, many = tile_paint(t_el)
+    if bc is None:
+        return None, many
+    own = ImageChops.multiply(over(t_el.getchannel('A'), 249), INSIDE)
+    band = ImageChops.multiply(BAND_IM, own)
+    if band.histogram()[255] < 0.6 * BAND_AREA:
+        return None, 'holes'                      # the tile must own its edge
+    pal = brand_palette(bc, variant)
+    done = sheen_tile(b, root, tile, later, t0, variant, band) if many else \
+        ramp_tile(b, root, tile, later, pal, variant, band)
+    if done is None:
+        return None, 'geom'
+    tile_edits, tile_extra, t1 = done
+    out = splice(b, tile_edits, tile_extra)
+    r = render(out)
+    if r is None or hits(changed(r, orig, 3), FAR):
+        return None, 'far'                        # what got repainted was not the tile
+    if moved_share(r, orig, t0, t1) > 0.005:
+        return None, 'moved'                      # art blended with the tile
+    how = 'many' if many else 'ramp'
+    # the art: whatever differs from the tile drawn on its own
+    region = points(ImageChops.multiply(changed(orig, t_el, 24), INSIDE))
+    art = set(region)
+    po = orig.load()
+    neut = [po[p][:3] for p in region if neutral(po[p][:3]) >= 1.0]
+    greys = sum(1 for c in neut if 0.18 <= luma(c) <= 0.70)
+    plans = []
+    if neut and greys < 0.5 * len(neut):     # ink and paper, not grey material
+        plans.append((ink_map(pal[2], pal[3]), '+ink'))
+    if variant == 'dark':
+        # dark art straight on the tile (Spotify's waves, a grey elephant)
+        # sinks into the deep tile: then, and only then, the tone map runs the
+        # other way round, whatever the art is
+        plans.append((ink_map(pal[3], pal[2]), '+ink-inverted'))
+    # what gets toned: the shapes drawn over the tile, and those that show
+    # through a notch in it (drawn before it, yet inside the squircle: not a
+    # shadow)
+    nodes = art_leaves(root, later)
+    for n in art_leaves(root, before):
+        if n.tag == 'image':
+            continue
+        fp = points(changed(t0, render(cut(b, later + [(n.start, n.end)])), 8))
+        if fp and sum(1 for p in fp if IN[p] == 255) >= 0.5 * len(fp):
+            nodes.append(n)
+    for f, tag in plans:
+        if tag == '+ink-inverted' and legible(r, orig, art):
+            break
+        pins, pextra, blind = recolour(b, root, nodes, f, 'tahoeInk', pin=True)
+        edits, extra, _ = recolour(b, root, nodes, f, 'tahoeInk')
+        if not edits:
+            continue
+        # the paints as read must be the paints drawn
+        rp = render(splice(b, pins, pextra))
+        if rp is None or changed_share(rp, orig, 3) > 0.002:
+            how += ' (ink unread)'
+            break
+        # and what can't be recoloured must not be art the tone map moves
+        if blind:
+            wo = render(cut(b, blind))
+            if wo is None:
+                break
+            missed = sum(1 for p in points(ImageChops.multiply(changed(orig, wo, 24), INSIDE))
+                         if neutral(po[p][:3]) >= 0.5
+                         and max(abs(u - v) for u, v in zip(f(po[p][:3]), po[p][:3])) > 20)
+            if missed > 16:
+                how += ' (ink blind)'
+                break
+        cand = splice(b, tile_edits + edits, tile_extra + extra)
+        rc = render(cand)
+        if rc is None or not legible(rc, orig, art):
+            continue                           # the other way round, or no ink
+        out, r = cand, rc
+        how += tag
+        break
+    if not legible(r, orig, art):
+        return None, 'illegible'
+    return out, how
+
+# --- white tile -> graphite (dark theme) ---------------------------------------
+# 5b turns MacTahoe's usual white tile gradients graphite, but not white tiles
+# painted any other way (Chrome's, Google's, WhatsApp's, ...), nor those whose
+# dark art would sink into the graphite (it keeps them white). Here, in the dark
+# theme, a white tile left white goes graphite after all: as it is when its art
+# still reads there, or with its neutral art turned round, dark glyphs light,
+# like the brand pass's inverted ink (Wikipedia's W, Notion's N). Either way at
+# most 30% of the tile may stay white, or it is a white card on a dark tile and
+# keeps its white tile instead.
+WHITE_INK, WHITE_PAPER = (18, 18, 18), (255, 255, 255)    # brand_palette's, for white
+
+def white_share(im):
+    px = im.load()
+    return sum(1 for p in INSIDE_PTS
+               if luma(px[p]) >= 0.85 and max(px[p][:3]) - min(px[p][:3]) <= 20) / len(INSIDE_PTS)
+
+def darken_white(b):
+    """-> (bytes, 'graphite' | 'graphite-inverted') or (None, why)."""
+    if b'tahoeTile' in b:
+        return None, 'standard'
+    root = parse(b)
+    if root is None:
+        return None, 'shape'
+    orig = render(b)
+    if not opaque(orig):
+        return None, 'shape'
+    lum, s = rim(orig)
+    if lum <= 0.8 or s >= 0.12:
+        return None, 'not-white'
+    nb, root = drop_edge(b, root)
+    if nb is not b:
+        b, orig = nb, render(nb)
+        if root is None or orig is None:
+            return None, 'paint'
+    path = find_tile(b, root)
+    if not path:
+        return None, 'shape'
+    tile, later, glass = tile_parts(b, path)
+    if tile is None:
+        return None, 'paint'
+    t0 = render(cut(b, later))
+    if t0 is None:
+        return None, 'paint'
+    px = t0.load()
+    ch = sorted(max(p[:3]) - min(p[:3]) for y in range(0, N, 2) for x in range(0, N, 2)
+                if BAND[x, y] >= 200 and (p := px[x, y])[3] >= 250)
+    if not ch or ch[int(0.9 * len(ch))] > 12:
+        return None, 'not-white'                 # a tinted tile: the brand pass's
+    nb, t1 = restyle(b, root, tile, later, glass, 'dark')
+    if nb is None:
+        return None, 'paint'
+    after = render(nb)
+    if after is None or hits(changed(after, orig, 3), FAR):
+        return None, 'paint'
+    if moved_share(after, orig, t0, t1) > 0.005:
+        return None, 'paint'                     # art blended with the tile
+    art = set(points(ImageChops.multiply(changed(orig, t0, 24), INSIDE)))
+    plain = legible(after, orig, art) and white_share(after) <= 0.3
+    # turned round, it may read much better (the calendar's dark 1, left as a
+    # thin outline on graphite, comes out white): then that one, else the plain
+    # graphite tile, the smaller change
+    inv = invert_white(nb, after, orig, art)
+    if inv is not None and (not plain or edges_kept(inv[1], orig) >= edges_kept(after, orig) + 0.15):
+        return inv[0], 'graphite-inverted'
+    return (nb, 'graphite') if plain else (None, 'unreadable')
+
+def edges_kept(r, orig):
+    """share of the original's luma steps that keep a third of their contrast
+    (and 0.08) in r: legible()'s first measure."""
+    e0 = edge_pairs(orig)
+    if not e0:
+        return 1.0
+    L = r.convert('L').load()
+    return sum(1 for (p, (dx, dy)), d in e0.items()
+               if abs(L[p] - L[p[0] + dx, p[1] + dy]) >= max(20, d / 3)) / len(e0)
+
+def invert_white(nb, after, orig, art):
+    """(bytes, render) of nb (a white tile made graphite) with its neutral
+    paints turned round, dark glyphs light, or None when that can't be done or
+    doesn't read."""
+    f = ink_map(WHITE_PAPER, WHITE_INK)
+    nroot = parse(nb)
+    npath = find_tile(nb, nroot)
+    if not npath:
+        return None
+    _, nlater, _ = tile_parts(nb, npath)
+    nodes = art_leaves(nroot, nlater)
+    pins, pextra, blind = recolour(nb, nroot, nodes, f, 'tahoeInk', pin=True)
+    edits, extra, _ = recolour(nb, nroot, nodes, f, 'tahoeInk')
+    if not edits:
+        return None
+    # the paints as read must be the paints drawn, and what can't be recoloured
+    # must not be art the tone map moves (as in brandify)
+    rp = render(splice(nb, pins, pextra))
+    if rp is None or changed_share(rp, after, 3) > 0.002:
+        return None
+    if blind:
+        wo = render(cut(nb, blind))
+        if wo is None:
+            return None
+        pa = after.load()
+        missed = sum(1 for p in points(ImageChops.multiply(changed(after, wo, 24), INSIDE))
+                     if neutral(pa[p][:3]) >= 0.5
+                     and max(abs(u - v) for u, v in zip(f(pa[p][:3]), pa[p][:3])) > 20)
+        if missed > 16:
+            return None
+    cand = splice(nb, edits, extra)
+    rc = render(cand)
+    if rc is None or not legible(rc, orig, art) or white_share(rc) > 0.3:
+        return None
+    return cand, rc
+
 # --- run ----------------------------------------------------------------------
 def svgs(d):
     return [f for f in sorted(os.listdir(d))
@@ -2062,13 +3331,41 @@ def write(p, b):
 memo = {}
 
 def standardise(b):
-    """-> (bytes, 'light' | 'dark') or (None, None): standard(b), worked out
+    """-> (bytes, 'light' | 'dark') or (None, why): standard(b), worked out
     once for a file the two themes share."""
     key = hashlib.sha1(b).digest()
     if key not in memo:
         memo[key] = standard(b)
-    nb, which = memo[key]
-    return (nb, which) if nb is not None else (None, None)
+    return memo[key]
+
+def retile(b, variant):
+    """-> (bytes, kind) with the tile on the common ramp (kind 'light' or
+    'dark'), a white one made graphite in the dark theme ('graphite' or
+    'graphite-inverted'), or made a brand tile ('brand', or 'brand-inverted'
+    when its dark art had to be turned light); or (None, why)."""
+    if variant == 'dark':
+        try:
+            nb, how = darken_white(b)
+        except Exception as e:                # one odd file must not stop the build
+            print(f'  graphite tile failed ({type(e).__name__}: {e}); white kept',
+                  file=sys.stderr)
+            nb, how = None, 'error'
+        if nb is not None:
+            return nb, how
+        if how == 'unreadable':
+            return standardise(b)[0], 'kept-white'
+    nb, which = standardise(b)
+    if nb is not None or which != 'brand':
+        return nb, which
+    try:
+        nb, how = brandify(b, variant)
+    except Exception as e:                    # one odd file must not stop the build
+        print(f'  brand tile failed ({type(e).__name__}: {e}); MacTahoe\'s kept',
+              file=sys.stderr)
+        return None, 'error'
+    if nb is None:
+        return None, how
+    return nb, 'brand-inverted' if 'inverted' in how else 'brand'
 
 def do_light(name):
     p = os.path.join(light_dir, name)
@@ -2076,7 +3373,8 @@ def do_light(name):
     s, why = reshadow(b)
     if s is None:
         # MacTahoe's shadow stays, but the tile can still take the common ramp
-        std, which = standardise(b) if why == 'kept' else (None, None)
+        # or become a brand tile
+        std, which = retile(b, 'light') if why == 'kept' else (None, None)
         if std is not None:
             write(p, std)
         return b, None, why, which
@@ -2087,7 +3385,7 @@ def do_light(name):
         lit, how = lighten(s)
         out = lit if lit is not None else s
     if out is s:
-        std, which = standardise(s)
+        std, which = retile(s, 'light')
         out = std if std is not None else s
     cut_at = out.rstrip().rfind(b'</svg>')
     sp = user_space(parse(out))
@@ -2104,7 +3402,7 @@ def do_dark(name, cache):
     s, why = cache[key] if key in cache else reshadow(b)
     if s is not None and render(s) is None:
         s, why = None, 'kept'
-    std, which = standardise(s if s is not None else b) \
+    std, which = retile(s if s is not None else b, 'dark') \
         if s is not None or why == 'kept' else (None, None)
     out = std if std is not None else s
     if out is not None:
@@ -2134,22 +3432,37 @@ print(f'Light theme: {lit} dark tiles made light ({light.get("lit+glyphs", 0)} w
       f'darkened glyphs); kept dark: {light.get("twotone", 0)} two-tone art, '
       f'{light.get("unreadable", 0)} unreadable on white, {light.get("paint", 0)} '
       f'unusual tile paint, {light.get("keep", 0)} from keep-dark.conf.')
+gi = dark_std.get('graphite-inverted', 0)
+print(f'Dark theme: {dark_std.get("graphite", 0) + gi} more white tiles made graphite '
+      f'({gi} with their dark art turned light); {dark_std.get("kept-white", 0)} kept '
+      f'white, their art would not read on graphite.')
+inv = dark_std.get('brand-inverted', 0)
+print(f'Brand tiles: {light_std.get("brand", 0)} coloured tiles in the light theme, '
+      f'{dark_std.get("brand", 0) + inv} in the dark one ({inv} with their dark art '
+      f'turned light); kept MacTahoe\'s tile where the art would not read: '
+      f'{light_std.get("illegible", 0)} light, {dark_std.get("illegible", 0)} dark.')
 PYEOF
+}
 
-# --- 5e. Tahoe corner rim on every dark app SVG -------------------------------
+# --- 5e. Tahoe corner rim on every app tile -----------------------------------
 # A 1px band just inside the squircle, lit from the top-left and bottom-right
 # corners. MacTahoe bakes this into a handful of icons (Finder, Obsidian) and
-# omits it everywhere else; this gives the whole dark theme the same edge.
-# Runs last so it layers over 5b's re-tint and 5c's Finder, and only in the dark
-# theme -- a white rim on the light theme's near-white tile is invisible (5d
-# gives that one step 5's dark outline instead).
-python3 - "$THEME_DARK/apps/scalable" "$DARK_TILE_RIM" <<'PYEOF'
+# omits it everywhere else; this gives every tile the same edge: every one in
+# the dark theme, and every one but the light tiles in the light theme (a white
+# rim on a near-white tile is invisible; 5d gives those step 5's dark outline).
+# Brand tiles (5d's tahoeBrand / tahoeSheen) take step 5's brand rim, the rest
+# DARK_TILE_RIM. Runs last so it layers over 5b's re-tint, 5c's Finder and 5d.
+# $1, $2: the dark and light themes' apps/scalable.
+step_5e() {
+python3 - "$1" "$2" \
+         "$DARK_TILE_RIM" "$BRAND_TILE_RIM" <<'PYEOF'
 import os, re, subprocess, sys, tempfile
 from PIL import Image
 
-dst_dir, RIM = sys.argv[1], float(sys.argv[2])
-if RIM <= 0:
-    print('Corner rim disabled (DARK_TILE_RIM=0).')
+dark_dir, light_dir = sys.argv[1], sys.argv[2]
+RIM, BRAND_RIM = float(sys.argv[3]), float(sys.argv[4])
+if RIM <= 0 and BRAND_RIM <= 0:
+    print('Corner rim disabled (DARK_TILE_RIM=0, BRAND_TILE_RIM=0).')
     raise SystemExit
 
 SVG = re.compile(r'<svg\b[^>]*>')
@@ -2182,7 +3495,7 @@ RIM_MARKUP = (
  '<rect width="55" height="55" x="4.5" y="4.5" rx="12.5" ry="12.5" '
  'stroke="url(#tahoeRimTL)"/>'
  '<rect width="55" height="55" x="4.5" y="4.5" rx="12.5" ry="12.5" '
- 'stroke="url(#tahoeRimBR)"/></g>') % RIM
+ 'stroke="url(#tahoeRimBR)"/></g>')                # % opacity
 
 def user_space(tag):
     """(kx, ky, ox, oy) mapping the 64-grid onto this file's user space. The
@@ -2224,66 +3537,306 @@ def fills_tile(px):
     a different shape would just gain a floating rounded rectangle."""
     return px is not None and all(px[x, y][3] >= 250 for x, y in PROBE)
 
-rimmed = skipped_have = skipped_shape = reverted = 0
-for name in sorted(os.listdir(dst_dir)):
-    p = os.path.join(dst_dir, name)
-    if os.path.islink(p) or not name.endswith('.svg'):
-        continue                       # aliases inherit their target's rim
-    with open(p, encoding='utf-8', errors='surrogateescape') as f:
-        s = f.read()
-    if 'tahoeRim' in s:
-        continue                       # already run over this file
-    ids = set(WT.findall(s))
-    if ids:
-        refs = HREF.findall(s)
-        if any(refs.count(i) >= 2 for i in ids):
-            skipped_have += 1          # MacTahoe already lights this one
+def light_tile(px):
+    """the tile is a light one (mean luma 0.8 and up along its edge)."""
+    return sum((0.299 * px[x, y][0] + 0.587 * px[x, y][1] + 0.114 * px[x, y][2]) / 255
+               for x, y in PROBE) / len(PROBE) >= 0.8
+
+for theme, dst_dir in (('dark', dark_dir), ('light', light_dir)):
+    rimmed = brand = skipped_have = skipped_shape = skipped_light = reverted = 0
+    for name in sorted(os.listdir(dst_dir)):
+        p = os.path.join(dst_dir, name)
+        if os.path.islink(p) or not name.endswith('.svg'):
+            continue                   # aliases inherit their target's rim
+        with open(p, encoding='utf-8', errors='surrogateescape') as f:
+            s = f.read()
+        if 'tahoeRim' in s:
+            continue                   # already run over this file
+        ids = set(WT.findall(s))
+        if ids:
+            refs = HREF.findall(s)
+            if any(refs.count(i) >= 2 for i in ids):
+                skipped_have += 1      # MacTahoe already lights this one
+                continue
+        m = SVG.search(s)
+        sp = user_space(m.group(0)) if m else None
+        px = render(p)
+        if sp is None or not s.rstrip().endswith('</svg>') or not fills_tile(px):
+            skipped_shape += 1
             continue
-    m = SVG.search(s)
-    sp = user_space(m.group(0)) if m else None
-    if sp is None or not s.rstrip().endswith('</svg>') or not fills_tile(render(p)):
-        skipped_shape += 1
-        continue
-    kx, ky, ox, oy = sp
-    rim = RIM_MARKUP
-    if (kx, ky, ox, oy) != (1.0, 1.0, 0.0, 0.0):
-        rim = ('<g transform="translate(%.6g %.6g) scale(%.6g %.6g)">%s</g>'
-               % (ox, oy, kx, ky, rim))
-    cut = s.rstrip().rfind('</svg>')
-    with open(p, 'w', encoding='utf-8', errors='surrogateescape') as f:
-        f.write(s[:cut] + rim + s[cut:])
-    if render(p) is None:
-        # the rim must never cost us the icon: put the original back
+        if theme == 'light' and light_tile(px):
+            skipped_light += 1
+            continue
+        is_brand = 'tahoeBrand' in s or 'tahoeSheen' in s
+        opacity = BRAND_RIM if is_brand else RIM
+        if opacity <= 0:
+            continue
+        kx, ky, ox, oy = sp
+        rim = RIM_MARKUP % opacity
+        if (kx, ky, ox, oy) != (1.0, 1.0, 0.0, 0.0):
+            rim = ('<g transform="translate(%.6g %.6g) scale(%.6g %.6g)">%s</g>'
+                   % (ox, oy, kx, ky, rim))
+        cut = s.rstrip().rfind('</svg>')
         with open(p, 'w', encoding='utf-8', errors='surrogateescape') as f:
-            f.write(s)
-        reverted += 1
-        continue
-    rimmed += 1
+            f.write(s[:cut] + rim + s[cut:])
+        if render(p) is None:
+            # the rim must never cost us the icon: put the original back
+            with open(p, 'w', encoding='utf-8', errors='surrogateescape') as f:
+                f.write(s)
+            reverted += 1
+            continue
+        rimmed += 1
+        brand += is_brand
 
-msg = (f'Corner rim added to {rimmed} dark app SVGs '
-       f'({skipped_have} already had one, {skipped_shape} are not full tiles')
-print(msg + (f', {reverted} REVERTED - rim broke the render).' if reverted
-             else ').'))
+    msg = (f'Corner rim added to {rimmed} {theme} app SVGs ({brand} brand tiles; '
+           f'{skipped_have} already had one, {skipped_shape} are not full tiles'
+           + (f', {skipped_light} are light tiles' if theme == 'light' else ''))
+    print(msg + (f', {reverted} REVERTED - rim broke the render).' if reverted
+                 else ').'))
 PYEOF
+}
 
-# --- 6. Icon caches -----------------------------------------------------------
-# GTK reads this cache; a stale one is worse than none, so rebuild it every run.
-for t in "$THEME_LIGHT" "$THEME_DARK"; do
+# Build a theme directory out of layers, or find what a build changed in one.
+# A later layer wins wherever two hold the same path. A symlink that points out
+# of its own layer (MacTahoe-dark's apps/scalable -> ../../MacTahoe/apps/scalable,
+# its top-level animations, emotes and preferences) is left out: it can only lead
+# back into a layer underneath, which supplies that path as a real copy. Every
+# file is copied: rsync's size-and-mtime check, used before, skipped MacTahoe-
+# dark's 24 wait-cursor frames, which match the light ones in both but not in
+# their pixels.
+#   layers assemble DEST LAYER...      DEST must not exist yet
+#   layers overlay DEST OUT LAYER...   copy into OUT every file and link of
+#                                      DEST that isn't what the layers give
+layers() {
+python3 - "$@" <<'PYEOF'
+import filecmp, os, shutil, sys
+
+mode, dest = sys.argv[1], sys.argv[2]
+
+def plan(roots):
+    """relative path -> ('dir', None) | ('file', source) | ('link', target),
+    parents before their children."""
+    out = {}
+    for root in roots:
+        for dp, dns, fns in os.walk(root):
+            for n in dns + fns:
+                p = os.path.join(dp, n)
+                rel = os.path.relpath(p, root)
+                if os.path.islink(p):
+                    t = os.readlink(p)
+                    to = os.path.normpath(os.path.join(os.path.dirname(rel), t))
+                    if os.path.isabs(t) or to == '..' or to.startswith('../'):
+                        continue
+                    entry = ('link', t)
+                elif os.path.isdir(p):
+                    entry = ('dir', None)
+                else:
+                    entry = ('file', p)
+                old = out.get(rel)
+                if old and old[0] == 'dir' and entry[0] != 'dir':
+                    for k in [k for k in out if k.startswith(rel + '/')]:
+                        del out[k]
+                out[rel] = entry
+    return out
+
+if mode == 'assemble':
+    os.makedirs(dest)
+    for rel, (kind, v) in plan(sys.argv[3:]).items():
+        p = os.path.join(dest, rel)
+        if kind == 'dir':
+            os.mkdir(p)
+        elif kind == 'link':
+            os.symlink(v, p)
+        else:
+            shutil.copy2(v, p)
+    raise SystemExit
+
+out_dir, want = sys.argv[3], plan(sys.argv[4:])
+changed = 0
+for dp, dns, fns in os.walk(dest):
+    for n in dns + fns:
+        p = os.path.join(dp, n)
+        rel = os.path.relpath(p, dest)
+        link = os.path.islink(p)
+        if rel == 'index.theme' or (os.path.isdir(p) and not link):
+            continue
+        w = want.get(rel)
+        if link and w == ('link', os.readlink(p)):
+            continue
+        if not link and w and w[0] == 'file' and filecmp.cmp(p, w[1], shallow=False):
+            continue
+        q = os.path.join(out_dir, rel)
+        os.makedirs(os.path.dirname(q), exist_ok=True)
+        if link:
+            os.symlink(os.readlink(p), q)
+        else:
+            shutil.copy2(p, q)
+        changed += 1
+# an overlay can add and replace, not delete: a build step that removed a file
+# would leave it in every theme assembled from prebuilt/
+gone = [rel for rel, (kind, _) in want.items()
+        if kind != 'dir' and not os.path.lexists(os.path.join(dest, rel))]
+if gone:
+    sys.exit('%s: %d files went missing during the build, %s among them'
+             % (dest, len(gone), gone[0]))
+print(f'  {changed} changed files kept in {out_dir}')
+PYEOF
+}
+
+# Remake prebuilt/: fresh copies of vendor/ through steps 5b-5e, keeping only
+# the files that changed. keep-dark.conf plays no part (5d gets an empty list):
+# prebuilt/ is the same for everyone, and keep_dark_icons applies each user's
+# own list on top of it.
+rebuild_prebuilt() {
+  local new="$REPO_DIR/.prebuilt.new"
+  echo "Rebuilding prebuilt/ from MacTahoe ${MACTAHOE_COMMIT:0:7}" \
+       "(about 9 minutes on 8 cores)..."
+  layers assemble "$STAGE_LIGHT" "$MACTAHOE"
+  layers assemble "$STAGE_DARK" "$MACTAHOE" "$MACTAHOE_DARK"
+  step_5b "$MACTAHOE/apps/scalable" "$STAGE_DARK/apps/scalable"
+  step_5c "$STAGE_DARK/apps/scalable/file-manager.svg"
+  step_5d "$STAGE_LIGHT/apps/scalable" "$STAGE_DARK/apps/scalable" /dev/null
+  step_5e "$STAGE_DARK/apps/scalable" "$STAGE_LIGHT/apps/scalable"
+  rm -rf "$new"
+  mkdir -p "$new"
+  layers overlay "$STAGE_LIGHT" "$new/Light" "$MACTAHOE"
+  layers overlay "$STAGE_DARK" "$new/Dark" "$MACTAHOE" "$MACTAHOE_DARK"
+  if [ -f "$PREBUILT/README.md" ]; then cp -p "$PREBUILT/README.md" "$new/"; fi
+  printf 'inputs=%s\nmactahoe=%s\nbuilt=%s\n' \
+    "$PREBUILT_ID" "$MACTAHOE_COMMIT" "$(date -u +%Y-%m-%d)" > "$new/STAMP"
+  rm -rf "$PREBUILT"
+  mv "$new" "$PREBUILT"
+  echo "prebuilt/ remade ($PREBUILT_ID)."
+}
+# <<< prebuilt
+
+# --- keep-dark.conf -----------------------------------------------------------
+# The one per-user setting steps 5b-5e read. prebuilt/ has every neutral dark
+# tile 5d could make light made light, so the icons listed there are redone
+# from MacTahoe's own files, through 5d's light pass and 5e's rim (a second or
+# two each), into the light theme being built.
+keep_dark_icons() {
+  [ -f "$KEEP_DARK_FILE" ] || return 0
+  local n f tmp apps
+  local -A files=()
+  apps="$(readlink -f "$MACTAHOE/apps/scalable")"
+  while IFS= read -r n || [ -n "$n" ]; do
+    n="${n%%#*}"; n="${n//[[:space:]]/}"
+    [ -n "$n" ] && [ -e "$apps/$n.svg" ] || continue
+    f="$(readlink -f "$apps/$n.svg")"     # an alias counts for its target
+    [ "${f%/*}" = "$apps" ] && files[${f##*/}]=1
+  done < "$KEEP_DARK_FILE"
+  [ "${#files[@]}" -gt 0 ] || return 0
+  tmp=$(mktemp -d)
+  mkdir "$tmp/light" "$tmp/dark"
+  for f in "${!files[@]}"; do
+    cp -p "$apps/$f" "$tmp/light/"
+    echo "${f%.svg}"
+  done > "$tmp/keep"
+  step_5d "$tmp/light" "$tmp/dark" "$tmp/keep" >/dev/null
+  step_5e "$tmp/dark" "$tmp/light" >/dev/null
+  cp -p "$tmp/light"/*.svg "$STAGE_LIGHT/apps/scalable/"
+  rm -rf "$tmp"
+  echo "keep-dark.conf: ${#files[@]} icon(s) keep their dark tile in the light theme."
+}
+
+# A running Plasma session (or KDE apps elsewhere) keeps showing the icons it
+# has cached until it is told the theme changed.
+plasma_nudge() {
+  local cur tool
+  cur=$(sed -n '/^\[Icons\]/,/^\[/s/^Theme=//p' "$CONFIG_HOME/kdeglobals" 2>/dev/null \
+          | head -n 1) || true
+  case "$cur" in MacOS-Like-Light|MacOS-Like-Dark) ;; *) return 0 ;; esac
+  for tool in "$(command -v plasma-changeicons 2>/dev/null || true)" \
+              /usr/lib/plasma-changeicons /usr/libexec/plasma-changeicons \
+              /usr/lib/*/libexec/plasma-changeicons; do
+    if [ -n "$tool" ] && [ -x "$tool" ]; then
+      "$tool" "$cur" >/dev/null 2>&1 || true
+      return 0
+    fi
+  done
+}
+
+# --- run ----------------------------------------------------------------------
+# 0. Each theme is put together in a hidden staging directory next to it:
+#    MacTahoe, MacTahoe-dark's restyled contexts for the dark one, prebuilt/'s
+#    app icons (or, with --rebuild, steps 5b-5e run there and remake prebuilt/),
+#    index.theme and keep-dark.conf's icons. Steps 1-5 add the app tiles, and
+#    only then does it replace the installed theme.
+STAGE_LIGHT="$DATA_HOME/icons/.MacOS-Like-Light.new"
+STAGE_DARK="$DATA_HOME/icons/.MacOS-Like-Dark.new"
+WORKLIST=""
+
+if [ "$DRYRUN" -eq 1 ]; then
+  OUT_LIGHT="$THEME_LIGHT"
+  OUT_DARK="$THEME_DARK"
+  plan_work
+  [ "${#WORK[@]}" -eq 0 ] || printf '%s\n' "${WORK[@]}"
+  exit 0
+fi
+
+mkdir -p "$DATA_HOME/icons"
+# One build at a time: two would race over the same staging directories.
+LOCK="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/macos-like-$(id -u).lock"
+exec 9>"$LOCK"
+if command -v flock >/dev/null 2>&1 && ! flock -n 9; then
+  echo "Another setup.sh is running; waiting for it to finish..."
+  flock 9
+fi
+cleanup() {
+  rm -rf "$STAGE_LIGHT" "$STAGE_DARK" "$REPO_DIR/.prebuilt.new"
+  if [ -n "$WORKLIST" ]; then rm -f "$WORKLIST"; fi
+}
+trap cleanup EXIT
+cleanup
+
+if [ "$REBUILD" -eq 1 ]; then
+  rebuild_prebuilt
+else
+  echo "Assembling both themes from vendor/ and prebuilt/..."
+  layers assemble "$STAGE_LIGHT" "$MACTAHOE" "$PREBUILT/Light"
+  layers assemble "$STAGE_DARK" "$MACTAHOE" "$MACTAHOE_DARK" "$PREBUILT/Dark"
+fi
+write_index "$STAGE_LIGHT" "MacOS-Like-Light" "$INHERITS_LIGHT"
+write_index "$STAGE_DARK" "MacOS-Like-Dark" "$INHERITS_DARK"
+keep_dark_icons
+
+OUT_LIGHT="$STAGE_LIGHT"
+OUT_DARK="$STAGE_DARK"
+plan_work
+step_5
+for t in "$STAGE_LIGHT" "$STAGE_DARK"; do
+  printf 'tiles=%s\nprebuilt=%s\n' "$TILES_ID" "$(stamp_id)" > "$t/$BUILD_INFO"
+done
+
+# --- 6. Icon caches, then the switch ------------------------------------------
+# GTK reads this cache; a stale one is worse than none, so every build makes a
+# fresh one. Each staging copy then replaces its theme with one rename.
+for t in "$STAGE_LIGHT" "$STAGE_DARK"; do
   gtk4-update-icon-cache -q -f "$t" 2>/dev/null \
     || gtk-update-icon-cache -q -f "$t" 2>/dev/null || true
 done
-
+swap() {
+  local old="${2%/*}/.${2##*/}.old"
+  rm -rf "$old"
+  if [ -e "$2" ]; then mv "$2" "$old"; fi
+  mv "$1" "$2"
+  rm -rf "$old"
+}
+swap "$STAGE_LIGHT" "$THEME_LIGHT"
+swap "$STAGE_DARK" "$THEME_DARK"
 echo "Themes written to $THEME_LIGHT and $THEME_DARK"
 
 # --- 7. Re-apply the folder tint ----------------------------------------------
-# Step 0 rsyncs MacTahoe back over both themes, which restores its blue folder
-# artwork. Lay the last tint (matugen palette or --color) back down so a rebuild
-# doesn't leave blue folders behind. The recolour reads from its own pristine
-# baseline, so this is idempotent; with no tint ever set, --if-set does nothing.
-# The copy matugen's post-hook runs is preferred, so both always agree.
+# Every build starts from vendor/'s blue folders. Lay the last tint (matugen
+# palette or --color) back down so a rebuild doesn't leave blue folders behind.
+# The recolour reads from its own pristine baseline, so this is idempotent; with
+# no tint ever set, --if-set does nothing. The copy matugen's post-hook runs is
+# preferred, so both always agree.
 RECOLOR_FOLDERS="$MATUGEN_HOOK"
 [ -f "$RECOLOR_FOLDERS" ] || RECOLOR_FOLDERS="$REPO_DIR/matugen/recolor_folders.py"
 if [ -f "$RECOLOR_FOLDERS" ]; then
   echo "Re-applying folder tint..."
   python3 "$RECOLOR_FOLDERS" --if-set || echo "  folder tint failed (non-fatal)" >&2
 fi
+plasma_nudge
