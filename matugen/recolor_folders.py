@@ -239,6 +239,12 @@ def refresh_caches():
     current = _current_icon_theme()
     if tool and current:
         subprocess.run([tool, current], capture_output=True)
+    # plasma-changeicons is a no-op when the theme name is already set, which it
+    # always is after a matugen recolour: the files changed, not the name.
+    # Announce it directly, so running Qt apps and shells drop cached icons.
+    if shutil.which("dbus-send"):
+        subprocess.run(["dbus-send", "--session", "--type=signal", "/KIconLoader",
+                        "org.kde.KIconLoader.iconChanged", "int32:0"], capture_output=True)
 
 
 def _plasma_changeicons():
