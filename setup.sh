@@ -91,10 +91,10 @@ TILE_OUTLINE_ALPHA="22"     # 2px black line just inside the edge; 0-255
 
 # Brand tile: an app tile of its own colour -- MacTahoe's coloured tiles
 # (Spotify, Discord, ...) and generated art that brings one (the Craft apps,
-# Beeper, Claude) -- keeps that colour, as a Tahoe ramp: lighter at the top in
-# the light theme, deep in the dark one, with a sheen and Finder's corner glass.
-# Its black and white ink is toned to the brand too. A tile of several hues
-# keeps its own gradient, deepened in the dark theme, under the same sheen.
+# Beeper, Claude) -- keeps that colour in both themes, as a Tahoe ramp lighter
+# at the top, with a sheen and Finder's corner glass. Its black and white ink is
+# toned to the brand too. A tile of several hues keeps its own gradient under
+# the same sheen. Only the sheen differs between the themes.
 # Feeds step 5 (generated PNGs), 5d (MacTahoe's SVGs) and 5e (the glass).
 BRAND_TILE_HL_LIGHT="0.22"  # white sheen opacity at the top edge
 BRAND_TILE_HL_DARK="0.12"
@@ -1214,27 +1214,14 @@ def hls(c, l=None, dl=0.0, ds=0.0, dh=0.0):
     r = colorsys.hls_to_rgb((h + dh) % 1, min(1, max(0, ll)), min(1, max(0, s + ds)))
     return tuple(round(v * 255) for v in r)
 
-def brand_palette(b, variant):
-    """(ramp top, ramp bottom, ink, paper). Light: the brand as a ramp, a
-    little lighter and cooler at the top, ink a deep brand shade, paper the
-    light tile's white. Dark: the brand deepened, ink near-black brand, paper a
-    pale brand tint. Step 5d's brand_palette is the same: keep them equal."""
-    if variant == 'light':
-        top, bot = hls(b, dl=.08, ds=.04, dh=-.012), hls(b, dl=-.10, dh=.012)
-        ink, paper = hls(b, l=.16, ds=.1), LIGHT_TOP
-    else:
-        l = colorsys.rgb_to_hls(*(v / 255 for v in b))[1]
-        top_l = min(.26, l)
-        top, bot = hls(b, l=top_l, ds=-.05), hls(b, l=max(.06, top_l - .12), ds=-.1)
-        ink = hls(b, l=.07)
-        paper = tuple(round(v + (255 - v) * .72) for v in b)
+def brand_palette(b):
+    """(ramp top, ramp bottom, ink, paper), the same in both themes: the brand
+    as a ramp, a little lighter and cooler at the top, ink a deep brand shade,
+    paper the light tile's white. Step 5d's brand_palette is the same: keep
+    them equal."""
+    top, bot = hls(b, dl=.08, ds=.04, dh=-.012), hls(b, dl=-.10, dh=.012)
+    ink, paper = hls(b, l=.16, ds=.1), LIGHT_TOP
     return top, bot, ink, paper
-
-def deepen(c):
-    """a many-hued tile's colour in the dark theme: as deep as the brand ramp,
-    its hue kept (step 5d deepens such a tile's gradient stops the same way)."""
-    return hls(c, l=max(.06, min(.26, colorsys.rgb_to_hls(*(v / 255 for v in c))[1]) - .06),
-               ds=-.08)
 
 def ink_map(ink, paper):
     """neutral colours onto the ink -> paper ramp by luma; colour stays."""
@@ -1246,10 +1233,9 @@ def ink_map(ink, paper):
 
 def brand_ground(brand, variant):
     """the repainted tile, shade and glow pixels: {(x, y): colour}. One brand
-    colour: its ramp. Many hues: the tile's own colours (deepened in the dark
-    theme) under the same sheen."""
+    colour: its ramp. Many hues: the tile's own colours under the same sheen."""
     fit, kind, b, _, many = brand
-    top, bot = brand_palette(b, variant)[:2]
+    top, bot = brand_palette(b)[:2]
     rows = tile_rows(top, bot, BRAND_HL[variant], DARK_HL_SPAN)
     res = {}
     for (x, y), (k, v) in kind.items():
@@ -1257,7 +1243,6 @@ def brand_ground(brand, variant):
             continue
         if many:
             c = at(fit, x, y)
-            c = deepen(c) if variant == 'dark' else c
             a = BRAND_HL[variant] * max(0.0, 1.0 - min(max((y - MARGIN) / TILE, 0.0), 1.0)
                                         / DARK_HL_SPAN)
             t = tuple(u + (255 - u) * a for u in c)
@@ -1344,11 +1329,9 @@ def small(im):
 def brand_variant(layer, brand, variant):
     """The icon on its brand tile for one theme, or None when nothing keeps
     its art readable there. Neutral art is toned to the brand (ink and paper
-    only, not grey material); in the dark theme, dark art straight on the tile
-    (Spotify's waves) that would sink into the deep tile has the tone map run
-    the other way round instead, whatever it is."""
+    only, not grey material)."""
     _, kind, b, tint, _ = brand
-    _, _, ink, paper = brand_palette(b, variant)
+    _, _, ink, paper = brand_palette(b)
     ground = brand_ground(brand, variant)
     am = Image.new('L', (C, C), 0)
     ap = am.load()
@@ -1359,16 +1342,10 @@ def brand_variant(layer, brand, variant):
     art = {p for p in PTS128 if am[p] >= 128}
     steps = edge_steps(small(layer))
     out = rebrand(layer, brand, ground)
-    plans = [ink_map(ink, paper)] if tint else []
-    if variant == 'dark':
-        plans.append(ink_map(paper, ink))
-    for i, f in enumerate(plans):
-        if variant == 'dark' and i == len(plans) - 1 and legible(small(out), steps, art):
-            break                     # reads as it is: no need to turn it round
-        cand = rebrand(layer, brand, ground, f)
+    if tint:
+        cand = rebrand(layer, brand, ground, ink_map(ink, paper))
         if legible(small(cand), steps, art):
             out = cand
-            break
     if not legible(small(out), steps, art):
         return None
     return Image.alpha_composite(Image.alpha_composite(SHADOW, out), BRAND_EDGE[variant])
@@ -2557,13 +2534,12 @@ def lighten(b):
 
 # --- coloured tile -> brand tile ---------------------------------------------
 # A tile whose paint is coloured (a brand colour, or a tinted neutral that
-# standard() leaves alone) is repainted the way step 5 paints a brand tile: its
-# colour as a Tahoe ramp, lighter at the top in the light theme and deep in the
-# dark one, with a sheen, and its neutral art toned to that colour (ink to a
-# deep shade; paper to white in light, to a pale tint in dark). A tile of two or
-# more hues is a design: its own gradient stays, deepened stop by stop in dark,
-# under the same sheen. 5e adds the corner glass. Every edit is checked by
-# rendering, and an icon that fails a check keeps MacTahoe's own tile.
+# standard() leaves alone) is repainted the way step 5 paints a brand tile, the
+# same in both themes: its colour as a Tahoe ramp, lighter at the top, with a
+# sheen, and its neutral art toned to that colour (ink to a deep shade, paper to
+# white). A tile of two or more hues is a design: its own gradient stays, under
+# the same sheen. 5e adds the corner glass. Every edit is checked by rendering,
+# and an icon that fails a check keeps MacTahoe's own tile.
 BRAND_HL = {'light': float(sys.argv[14]), 'dark': float(sys.argv[15])}
 SPAN = DHL_SPAN
 SINGLE_HUE = 0.25          # circular std of the tile's hue, radians
@@ -2574,15 +2550,10 @@ def hls(c, l=None, dl=0.0, ds=0.0, dh=0.0):
     r = colorsys.hls_to_rgb((h + dh) % 1, min(1, max(0, ll)), min(1, max(0, s + ds)))
     return tuple(round(v * 255) for v in r)
 
-def brand_palette(b, variant):
+def brand_palette(b):
     """(ramp top, ramp bottom, ink, paper): step 5's brand_palette, kept equal."""
-    if variant == 'light':
-        top, bot = hls(b, dl=.08, ds=.04, dh=-.012), hls(b, dl=-.10, dh=.012)
-        ink, paper = hls(b, l=.16, ds=.1), HI
-    else:
-        top_l = min(.26, colorsys.rgb_to_hls(*(v / 255 for v in b))[1])
-        top, bot = hls(b, l=top_l, ds=-.05), hls(b, l=max(.06, top_l - .12), ds=-.1)
-        ink, paper = hls(b, l=.07), tuple(round(v + (255 - v) * .72) for v in b)
+    top, bot = hls(b, dl=.08, ds=.04, dh=-.012), hls(b, dl=-.10, dh=.012)
+    ink, paper = hls(b, l=.16, ds=.1), HI
     return top, bot, ink, paper
 
 def sheen_at(variant, t):
@@ -2592,12 +2563,6 @@ def brand_at(pal, variant, t):
     col = [round(a + (c - a) * t) for a, c in zip(pal[0], pal[1])]
     a = sheen_at(variant, t)
     return tuple(round(c + (255 - c) * a) for c in col)
-
-def deepen(c):
-    """a stop of a many-hued tile, in the dark theme: as deep as the brand ramp
-    (step 5's deepen, kept equal)."""
-    return hls(c, l=max(.06, min(.26, colorsys.rgb_to_hls(*(v / 255 for v in c))[1]) - .06),
-               ds=-.08)
 
 def row_t(y):
     return min(max((y + 0.5 - 4 * K) / (56 * K), 0.0), 1.0)
@@ -2935,29 +2900,10 @@ def sheened(im, variant):
 
 def sheen_tile(b, root, tile, later, t0, variant, band):
     """-> (edits, extra, tile-only render): a many-hued tile keeps its own
-    gradient (deepened stop by stop in the dark theme) and gets the sheen as a
-    copy of itself painted white -> clear, just above it."""
-    edits, extra, under = [], '', t0
-    if variant == 'dark':
-        rules = css_rules(b, root)
-        p = paint(tile, 'fill', rules)
-        if p[0] != 'url':
-            return None
-        s, e = tile.start, tag_end(b, tile.start)
-        edit = (s, e, with_style(b[s:e], 'fill', 'url(#tahoeDeep)'))
-        sh = len(edit[2]) - (e - s)
-        bare = [(a + sh, z + sh) for a, z in later]
-        # the copy, its stops left as they are, must draw the very same tile
-        pin = copy_gradient(root, p[1], 'tahoeDeep', deepen, rules, pin=True)
-        mk = copy_gradient(root, p[1], 'tahoeDeep', deepen, rules)
-        if not mk:
-            return None
-        tp = render(cut(splice(b, [edit], pin), bare))
-        under = render(cut(splice(b, [edit], mk), bare))
-        if tp is None or under is None or changed_share(tp, t0, 3) > 0.002:
-            return None
-        edits, extra = [edit], mk
-    exp = sheened(under, variant)
+    gradient and gets the sheen as a copy of itself painted white -> clear,
+    just above it."""
+    edits, extra = [], ''
+    exp = sheened(t0, variant)
     dup = b[tile.start:tile.end]
     e = tag_end(dup, 0)
     head = re.sub(rb'\sid\s*=\s*"[^"]*"', b'', dup[:e], count=1)
@@ -3103,10 +3049,6 @@ def brandify(b, variant):
     root = parse(b)
     if root is None:
         return None, 'shape'
-    if variant == 'dark':
-        b, root = drop_edge(b, root)
-        if root is None:
-            return None, 'shape'
     orig = render(b)
     if not opaque(orig):
         return None, 'shape'
@@ -3132,7 +3074,7 @@ def brandify(b, variant):
     band = ImageChops.multiply(BAND_IM, own)
     if band.histogram()[255] < 0.6 * BAND_AREA:
         return None, 'holes'                      # the tile must own its edge
-    pal = brand_palette(bc, variant)
+    pal = brand_palette(bc)
     done = sheen_tile(b, root, tile, later, t0, variant, band) if many else \
         ramp_tile(b, root, tile, later, pal, variant, band)
     if done is None:
@@ -3154,11 +3096,6 @@ def brandify(b, variant):
     plans = []
     if neut and greys < 0.5 * len(neut):     # ink and paper, not grey material
         plans.append((ink_map(pal[2], pal[3]), '+ink'))
-    if variant == 'dark':
-        # dark art straight on the tile (Spotify's waves, a grey elephant)
-        # sinks into the deep tile: then, and only then, the tone map runs the
-        # other way round, whatever the art is
-        plans.append((ink_map(pal[3], pal[2]), '+ink-inverted'))
     # what gets toned: the shapes drawn over the tile, and those that show
     # through a notch in it (drawn before it, yet inside the squircle: not a
     # shadow)
@@ -3170,8 +3107,6 @@ def brandify(b, variant):
         if fp and sum(1 for p in fp if IN[p] == 255) >= 0.5 * len(fp):
             nodes.append(n)
     for f, tag in plans:
-        if tag == '+ink-inverted' and legible(r, orig, art):
-            break
         pins, pextra, blind = recolour(b, root, nodes, f, 'tahoeInk', pin=True)
         edits, extra, _ = recolour(b, root, nodes, f, 'tahoeInk')
         if not edits:
@@ -3195,7 +3130,7 @@ def brandify(b, variant):
         cand = splice(b, tile_edits + edits, tile_extra + extra)
         rc = render(cand)
         if rc is None or not legible(rc, orig, art):
-            continue                           # the other way round, or no ink
+            continue                           # no ink, then
         out, r = cand, rc
         how += tag
         break
@@ -3208,10 +3143,9 @@ def brandify(b, variant):
 # painted any other way (Chrome's, Google's, WhatsApp's, ...), nor those whose
 # dark art would sink into the graphite (it keeps them white). Here, in the dark
 # theme, a white tile left white goes graphite after all: as it is when its art
-# still reads there, or with its neutral art turned round, dark glyphs light,
-# like the brand pass's inverted ink (Wikipedia's W, Notion's N). Either way at
-# most 30% of the tile may stay white, or it is a white card on a dark tile and
-# keeps its white tile instead.
+# still reads there, or with its neutral art turned round, dark glyphs light
+# (Wikipedia's W, Notion's N). Either way at most 30% of the tile may stay
+# white, or it is a white card on a dark tile and keeps its white tile instead.
 WHITE_INK, WHITE_PAPER = (18, 18, 18), (255, 255, 255)    # brand_palette's, for white
 
 def white_share(im):
@@ -3341,8 +3275,7 @@ def standardise(b):
 def retile(b, variant):
     """-> (bytes, kind) with the tile on the common ramp (kind 'light' or
     'dark'), a white one made graphite in the dark theme ('graphite' or
-    'graphite-inverted'), or made a brand tile ('brand', or 'brand-inverted'
-    when its dark art had to be turned light); or (None, why)."""
+    'graphite-inverted'), or made a brand tile ('brand'); or (None, why)."""
     if variant == 'dark':
         try:
             nb, how = darken_white(b)
@@ -3365,7 +3298,7 @@ def retile(b, variant):
         return None, 'error'
     if nb is None:
         return None, how
-    return nb, 'brand-inverted' if 'inverted' in how else 'brand'
+    return nb, 'brand'
 
 def do_light(name):
     p = os.path.join(light_dir, name)
@@ -3436,10 +3369,9 @@ gi = dark_std.get('graphite-inverted', 0)
 print(f'Dark theme: {dark_std.get("graphite", 0) + gi} more white tiles made graphite '
       f'({gi} with their dark art turned light); {dark_std.get("kept-white", 0)} kept '
       f'white, their art would not read on graphite.')
-inv = dark_std.get('brand-inverted', 0)
 print(f'Brand tiles: {light_std.get("brand", 0)} coloured tiles in the light theme, '
-      f'{dark_std.get("brand", 0) + inv} in the dark one ({inv} with their dark art '
-      f'turned light); kept MacTahoe\'s tile where the art would not read: '
+      f'{dark_std.get("brand", 0)} in the dark one; kept MacTahoe\'s tile where the art '
+      f'would not read: '
       f'{light_std.get("illegible", 0)} light, {dark_std.get("illegible", 0)} dark.')
 PYEOF
 }
